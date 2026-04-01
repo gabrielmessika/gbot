@@ -1414,8 +1414,167 @@ Rejouer session par session avec le moteur complet :
               BacktestRunner (replay JSONL → pipeline complet → BacktestSummary)
   Critère de sortie : expectancy nette > 0, maker_fill_rate > 40%
 
+  Phase 7.1 — Bug fixes post dry-run v1 (1-2 jours)
+  Problèmes identifiés lors du dry-run du 2026-04-01 (WR=12%, 7/8 SL_HIT à -0.30%)
+
+  a) Fix spread_bps négatif
+     - 14/16 signaux placés ont un spread_bps < 0 → le book est inversé (ask < bid)
+     - Cause probable : book stale ou delta appliqué sans snapshot → best_bid et best_ask incohérents
+     - Fix : guard dans spread_bps() → retourner None si ask <= bid
+     - Fix : guard dans compute_features() → skip si book pas snapshot_loaded ou spread négatif
+     - Fix : marquer book_stale=true si spread négatif détecté (symptôme de données corrompues)
+
+  b) Fix normalisation OFI saturée
+     - OFI_10s vaut 1.0 ou -1.0 dans la majorité des signaux → pas de nuance
+     - Cause : la normalisation (buy-sell)/(buy+sell) sature dès qu'un côté domine légèrement
+     - Options : (1) utiliser le volume brut non-normalisé + z-score rolling, (2) clamp plus tard
+       avec un seuil plus large, (3) utiliser OFI cumulé (ΔQ_bid - ΔQ_ask) au lieu du ratio
+
+  c) Fix vol_ratio = 0.0
+     - Moitié des signaux ont vol_ratio=0.0 → realized_vol_30s n'a pas assez d'échantillons
+     - Probablement les premiers seconds après startup ou coins peu actifs
+     - Fix : ne pas émettre de signal si les features temporelles ne sont pas matures
+       (exiger N échantillons minimum dans les fenêtres roulantes avant toute évaluation)
+
+  d) Fix aggression toujours 0.5-1.0
+     - Jamais < 0.5 → le calcul est biaisé ou la fenêtre est trop courte
+     - Vérifier la formule (proportion de trades dans la même direction sur les 10 derniers)
+     - Si la fenêtre est trop courte (< 10 trades), l'aggression est bruiteuse → exiger un minimum
+
+  Critère de sortie : 0 signal avec spread_bps négatif, OFI distribué sur [-1,+1] avec variance,
+                       vol_ratio > 0 pour tous les signaux émis
+
+  Phase 7.2 — SL/TP dynamique basé sur la volatilité (2-3 jours)
+  Problème : SL fixé à 0.30% (pullback_retrace_pct) pour TOUS les coins, quelle que soit
+  la volatilité. 0.30% = 30 bps ≈ bruit normal pour la plupart des coins. Résultat : 7/8
+  trades fermés par SL immédiatement (dans les secondes qui suivent l'entrée).
+
+  a) SL adaptatif par realized_vol
+     - SL_distance = max(sl_min_bps, N × realized_vol_30s)
+     - N calibré pour que le SL soit hors du bruit normal (ex: N=2.5 → ~99% du bruit 30s)
+     - sl_min_bps = plancher pour éviter un SL à 0 en marché mort (ex: 10 bps)
+     - sl_max_bps = plafond pour ne pas risquer trop (ex: 80 bps)
+
+  b) TP dynamique avec R:R configurable
+     - TP_distance = SL_distance × target_rr (défaut : 2.0)
+     - R:R et SL calibrés par coin tier (BTC plus serré, small caps plus large)
+     - À terme : R:R optimal par régime (QuietTight → R:R 3:1, ActiveHealthy → R:R 1.5:1)
+
+  c) MAE adaptatif
+     - max_mae_bps (actuellement 15 bps fixe) devrait aussi être proportionnel à realized_vol
+     - MAE = SL_distance × mae_pct (ex: 50% du SL → si SL=40bps, MAE=20bps)
+
+  d) Supprimer pullback_retrace_pct comme paramètre de SL
+     - Ce paramètre contrôle actuellement deux choses (le retrace attendu ET le SL) → séparer
+     - Le retrace attendu (entrée) et la distance SL (risk) sont des concepts différents
+
+  Critère de sortie : SL varie par coin selon volatilité réalisée, aucun signal avec SL < 20 bps,
+                       backtest amélioré vs fixed SL
+
+  Phase 7.3 — Direction score : conviction et confirmation (2-3 jours)
+  Problème : les scores directionnels sont juste au-dessus du seuil (0.50-0.67), indiquant
+  une conviction faible. La stratégie entre trop facilement.
+
+  a) Augmenter le seuil direction_threshold
+     - Passer de ±0.50 à ±0.55 ou ±0.60
+     - À calibrer sur les données collectées : quel seuil sépare les trades gagnants des perdants ?
+
+  b) Exiger la persistance du signal (confirmation)
+     - Ne pas entrer sur un seul tick d'OFI favorable
+     - Exiger que le direction_score reste > seuil pendant N mises à jour consécutives (ex: 3-5)
+     - Implémentation : compteur par coin, reset si score passe sous le seuil
+     - Effet : filtrer les spikes de bruit, ne garder que les tendances micro établies
+
+  c) Score de qualité des features
+     - Avant de calculer le direction_score, vérifier que les features sont fiables :
+       - spread_bps > 0 (book sain)
+       - vol_ratio > 0 (données temporelles matures)
+       - trade_intensity > seuil (assez de trades pour que l'OFI soit significatif)
+     - Si une feature est "stale" ou absente → réduire son poids dans le score (pas la forcer à 0)
+
+  d) Feature decorrelation
+     - OFI, micro_price, VAMP sont potentiellement corrélés (tous mesurent un biais directionnel)
+     - Vérifier empiriquement la corrélation sur les données collectées
+     - Si r > 0.8 entre deux features → n'en garder qu'une (ou combiner via PCA)
+
+  Critère de sortie : dir_score moyen des trades placés > 0.60, réduction de 30%+ des faux signaux
+
+  Phase 7.4 — Analyse offline des données collectées (3-5 jours, Python)
+  ⚠ Phase critique — conditionne la calibration de 7.2 et 7.3.
+  Utiliser les données accumulées (L2, trades, features, signaux) pour calibrer empiriquement.
+
+  a) Distribution des features par régime
+     - Histogrammes : spread_bps, OFI_10s, micro_price_vs_mid, toxicity par régime
+     - Identifier les features discriminantes vs bruitées
+
+  b) Pouvoir prédictif des features
+     - Pour chaque feature : corrélation avec mid_move_Ns (N = 1s, 5s, 10s, 30s)
+     - Tableau feature × horizon → Spearman rank correlation (+ IC 95%)
+     - Quelles features prédisent une direction ? À quel horizon ?
+
+  c) Analyse adverse selection
+     - Sur les fills dry-run : combien move dans la bonne direction vs mauvaise à +5s, +10s, +30s ?
+     - Si adverse_selection > 60% → le signal n'a pas d'edge, ajuster les features
+
+  d) Optimisation SL/TP
+     - Sur les trades fermés : quel SL/TP maximise l'expectancy nette ?
+     - MAE/MFE analysis : quelle excursion adverse/favorable est typique par coin ?
+     - Résultat → paramétrer sl_min_bps, sl_max_bps, sl_vol_multiplier, target_rr
+
+  e) Performance par coin
+     - Quels coins sont profitables ? Quels coins drainent le P&L ?
+     - Réduire l'univers aux coins avec edge démontré
+
+  f) Performance par heure UTC
+     - Certaines heures ont-elles un meilleur edge ? (sessions active Asia/EU/US)
+     - Potentiel de filtre horaire pour éviter les heures mortes
+
+  Livrables : notebook Python avec résultats, paramètres calibrés pour phases 7.2/7.3
+
+  Phase 7.5 — Entry timing : vrai pullback + flow confirmation (2-3 jours)
+  Problème : le bot entre dès que le direction_score franchit le seuil. La section 8.3 du plan
+  décrit un mécanisme de "wait for pullback" mais l'implémentation actuelle ne vérifie pas
+  de vrai retrace — elle entre immédiatement au best bid/ask.
+
+  a) Détection de micro-move
+     - Tracker le high/low récent (fenêtre 10-30s) pour chaque coin
+     - Un micro-move haussier = nouveau high 10s. Baissier = nouveau low 10s.
+     - Le pullback = retrace de X% du micro-move (ex: 30-50%)
+     - Ne placer l'ordre ALO qu'une fois le pullback confirmé
+
+  b) Flow confirmation post-pullback
+     - Après le pullback, attendre que l'OFI repasse en faveur de la direction initiale
+     - Cela confirme que le pullback est une respiration, pas un renversement
+     - Séquence complète : direction_score > seuil → micro-move → pullback → OFI reprend → entry
+
+  c) Abandon de setup
+     - Si le pullback ne vient pas dans max_wait_pullback_s (30s) → abandon
+     - Si le pullback dépasse 100% du micro-move → c'est un renversement, pas un pullback → abandon
+     - Si un nouveau signal opposé apparaît pendant l'attente → abandon
+
+  Critère de sortie : les entrées ne se font plus au premier tick, mais après un retrace confirmé.
+                       Le taux de SL immédiat (< 30s) diminue de > 50%
+
+  Phase 7.6 — Backtest replay amélioré (2-3 jours)
+  Le BacktestRunner actuel est simplifié (JSONL replay). Les données L2 collectées permettent
+  un backtest beaucoup plus réaliste.
+
+  a) Replay L2 tick-by-tick
+     - Lire les fichiers data/l2/{coin}/{date}.jsonl dans l'ordre chronologique
+     - Reconstruire le book localement → calculer les features → passer au strategy
+     - Simuler les fills ALO avec le modèle probabiliste (section 13.2)
+
+  b) Modèle d'adverse selection dans le backtest
+     - Chaque fill ALO simulé a un taux d'adverse selection calibré sur les données réelles
+     - Ne pas surestimer la profitabilité maker (winner's curse)
+
+  c) Comparaison SL fixe vs dynamique
+     - Rejouer les mêmes données avec SL fixe (actuel) vs SL volatility-based (phase 7.2)
+     - Mesurer l'amélioration de l'expectancy nette
+
   Phase 8 — Live pilot (continu)
   Ultra-réduit, 1 actif, surveillance renforcée (voir section 16 étape 6)
+  Pré-requis : phases 7.1-7.5 validées, backtest phase 7.6 montrant expectancy nette > 0
 
   Phase 9 — UI de monitoring + alertes (2-3 jours)
   Backend : Axum, endpoints /api/stream SSE, /api/state, /metrics Prometheus
@@ -1424,6 +1583,8 @@ Rejouer session par session avec le moteur complet :
 ```
 
 > **Note sur les timelines** : les phases 1, 5 et 6 sont les plus risquées. Elles concentrent la quasi-totalité des bugs observés sur t-bot et tbot-scalp. Les phases 0–3 et 5–7 sont implémentées ; la phase 4 (observation pure + calibration) reste à faire avant le live.
+>
+> **Post dry-run v1 (2026-04-01)** : les phases 7.1–7.6 ont été ajoutées après le premier dry-run. Le dry-run a révélé que l'observabilité fonctionne (journal, signaux, fills simulés), mais la stratégie elle-même a un WR de 12% avec 7/8 trades fermés par SL à -0.30%. Causes identifiées : (1) SL fixe trop serré pour le bruit normal, (2) spread_bps négatifs (book inversé), (3) features saturées (OFI, vol_ratio), (4) pas de vrai pullback avant entrée. L'ordre des phases respecte les dépendances : bugfixes → SL dynamique → calibration direction → analyse offline → entry timing → backtest amélioré.
 
 ---
 
@@ -1512,4 +1673,4 @@ Catalogue complet intégré directement dans le design pour ne pas reproduire ce
 
 ---
 
-*Ce plan synthétise les meilleures idées de PLAN.md et plan2.md, avec les corrections issues de l'expérience live de t-bot et tbot-scalp.*
+*Ce plan synthétise les meilleures idées de plan_v1.md et plan_v2.md, avec les corrections issues de l'expérience live de t-bot et tbot-scalp.*
