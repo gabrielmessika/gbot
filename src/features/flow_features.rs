@@ -1,0 +1,169 @@
+use std::collections::VecDeque;
+
+use serde::{Deserialize, Serialize};
+
+use crate::market_data::book_manager::TapeEntry;
+
+/// Temporal features computed over rolling windows from the trade tape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FlowFeatures {
+    // OFI — multiple windows
+    pub ofi_1s: f64,
+    pub ofi_3s: f64,
+    pub ofi_10s: f64,
+    pub ofi_30s: f64,
+
+    // Trade aggression
+    pub trade_intensity: f64,       // trades/sec over 10s window
+    pub avg_trade_size: f64,
+    pub large_trade_ratio: f64,     // % trades > 2× avg size
+    pub aggression_persistence: f64, // proportion of trades in same direction (last 10)
+
+    // Realized volatility
+    pub realized_vol_3s: f64,
+    pub realized_vol_10s: f64,
+    pub realized_vol_30s: f64,
+    pub vol_ratio: f64,             // realized_vol_3s / realized_vol_30s
+
+    // Toxicity proxy
+    pub fill_toxicity_5s: f64,     // Delayed: available at T+5s
+    pub toxicity_proxy_instant: f64, // Proportion of trades that consumed best level
+
+    // Refill speed
+    pub refill_speed: f64,
+
+    // Cancel/add ratio (spoofing proxy)
+    pub cancel_add_ratio: f64,
+}
+
+/// Compute flow features from the trade tape.
+///
+/// `cancel_add_ratio` is supplied by the caller from `BookManager::get_cancel_add_ratio()`.
+/// `refill_speed` requires per-level order tracking not yet available — left at 0.0.
+pub fn compute_flow_features(tape: &VecDeque<TapeEntry>, now_ms: i64, cancel_add_ratio: f64) -> FlowFeatures {
+    let mut features = FlowFeatures::default();
+
+    if tape.is_empty() {
+        return features;
+    }
+
+    // ── OFI (Order Flow Imbalance) ──
+    features.ofi_1s = compute_ofi(tape, now_ms, 1_000);
+    features.ofi_3s = compute_ofi(tape, now_ms, 3_000);
+    features.ofi_10s = compute_ofi(tape, now_ms, 10_000);
+    features.ofi_30s = compute_ofi(tape, now_ms, 30_000);
+
+    // ── Trade aggression ──
+    let window_10s: Vec<&TapeEntry> = tape
+        .iter()
+        .filter(|t| now_ms - t.timestamp <= 10_000)
+        .collect();
+
+    if !window_10s.is_empty() {
+        let elapsed_s = (now_ms - window_10s.first().unwrap().timestamp).max(1) as f64 / 1000.0;
+        features.trade_intensity = window_10s.len() as f64 / elapsed_s;
+
+        let total_size: f64 = window_10s.iter().map(|t| t.size).sum();
+        features.avg_trade_size = total_size / window_10s.len() as f64;
+
+        let large_threshold = features.avg_trade_size * 2.0;
+        let large_count = window_10s.iter().filter(|t| t.size > large_threshold).count();
+        features.large_trade_ratio = large_count as f64 / window_10s.len() as f64;
+    }
+
+    // Aggression persistence: proportion of last 10 trades in the same direction
+    let last_n: Vec<&TapeEntry> = tape.iter().rev().take(10).collect();
+    if !last_n.is_empty() {
+        let buy_count = last_n.iter().filter(|t| t.is_buy).count();
+        let sell_count = last_n.len() - buy_count;
+        features.aggression_persistence = buy_count.max(sell_count) as f64 / last_n.len() as f64;
+    }
+
+    // ── Realized volatility ──
+    features.realized_vol_3s = compute_realized_vol(tape, now_ms, 3_000);
+    features.realized_vol_10s = compute_realized_vol(tape, now_ms, 10_000);
+    features.realized_vol_30s = compute_realized_vol(tape, now_ms, 30_000);
+    features.vol_ratio = if features.realized_vol_30s > 0.0 {
+        features.realized_vol_3s / features.realized_vol_30s
+    } else {
+        1.0
+    };
+
+    // ── Toxicity proxy (instant — no lookahead) ──
+    // Proportion of trades that moved the price significantly (> 0.01%)
+    if tape.len() >= 2 {
+        let recent: Vec<&TapeEntry> = tape.iter().rev().take(100).collect();
+        let mut toxic_count = 0;
+        for pair in recent.windows(2) {
+            let prev = pair[1]; // older
+            let curr = pair[0]; // newer
+            if prev.price > 0.0 {
+                let move_pct = ((curr.price - prev.price) / prev.price).abs();
+                if move_pct > 0.0001 {
+                    toxic_count += 1;
+                }
+            }
+        }
+        let total_pairs = recent.len().saturating_sub(1).max(1);
+        features.toxicity_proxy_instant = toxic_count as f64 / total_pairs as f64;
+    }
+
+    // ── Cancel/add ratio (spoofing proxy) — supplied from BookManager delta stats ──
+    features.cancel_add_ratio = cancel_add_ratio;
+
+    // ── Refill speed — requires per-level order tracking, not yet available ──
+    // features.refill_speed = ...; // TODO: implement with L2 order-level tracking
+
+    features
+}
+
+/// OFI = (buy_vol - sell_vol) / (buy_vol + sell_vol) over a time window.
+fn compute_ofi(tape: &VecDeque<TapeEntry>, now_ms: i64, window_ms: i64) -> f64 {
+    let mut buy_vol = 0.0;
+    let mut sell_vol = 0.0;
+
+    for entry in tape.iter().rev() {
+        if now_ms - entry.timestamp > window_ms {
+            break;
+        }
+        if entry.is_buy {
+            buy_vol += entry.size;
+        } else {
+            sell_vol += entry.size;
+        }
+    }
+
+    let total = buy_vol + sell_vol;
+    if total == 0.0 {
+        return 0.0;
+    }
+    (buy_vol - sell_vol) / total
+}
+
+/// Realized volatility: std dev of log returns over a time window.
+fn compute_realized_vol(tape: &VecDeque<TapeEntry>, now_ms: i64, window_ms: i64) -> f64 {
+    let prices: Vec<f64> = tape
+        .iter()
+        .rev()
+        .filter(|t| now_ms - t.timestamp <= window_ms)
+        .map(|t| t.price)
+        .collect();
+
+    if prices.len() < 2 {
+        return 0.0;
+    }
+
+    let returns: Vec<f64> = prices
+        .windows(2)
+        .filter(|w| w[1] > 0.0)
+        .map(|w| (w[0] / w[1]).ln())
+        .collect();
+
+    if returns.is_empty() {
+        return 0.0;
+    }
+
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+    variance.sqrt()
+}
