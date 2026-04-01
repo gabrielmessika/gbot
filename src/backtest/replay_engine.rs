@@ -9,7 +9,9 @@ pub struct BacktestTrade {
     pub direction: String,
     pub entry_price: f64,
     pub exit_price: f64,
-    pub size: f64,
+    pub size: f64,       // coins
+    pub size_usd: f64,   // notional at entry (equity-based sizing)
+    pub leverage: u32,
     pub entry_maker: bool,
     pub exit_maker: bool,
     pub pnl_gross: f64,

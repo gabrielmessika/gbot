@@ -358,7 +358,9 @@ async fn main() -> Result<()> {
                                     .get(coin)
                                     .map(|p| (now_ms - p.opened_at) / 1000)
                                     .unwrap_or(0);
-                                if elapsed_s > settings.execution.max_hold_s as i64 {
+                                if elapsed_s > settings.execution.max_hold_s as i64
+                                    && !matches!(order_mgr.state(coin), gbot::execution::order_manager::TradeState::ForceExit { .. })
+                                {
                                     if let Some(pos) = position_mgr.get(coin) {
                                         let intent = Intent::ForceExitIoc {
                                             coin: coin.clone(),
@@ -381,7 +383,9 @@ async fn main() -> Result<()> {
                                 }
 
                                 // Regime-forced exit
-                                if regime.requires_exit() {
+                                if regime.requires_exit()
+                                    && !matches!(order_mgr.state(coin), gbot::execution::order_manager::TradeState::ForceExit { .. })
+                                {
                                     if let Some(pos) = position_mgr.get(coin) {
                                         warn!(
                                             "[MAIN] Regime {:?} requires exit for {}",
@@ -981,9 +985,23 @@ async fn main() -> Result<()> {
                     }
 
                     // ── Dry-run position exit simulation ──
-                    // Check if mid hit SL or TP for any open position
+                    // Check if mid hit SL or TP for any open position,
+                    // or if a ForceExit was requested (max_hold / regime)
                     let mut dry_exits: Vec<(String, Decimal, String)> = Vec::new();
                     for pos in position_mgr.all().values() {
+                        // ForceExit: close at current mid immediately
+                        if matches!(order_mgr.state(&pos.coin), gbot::execution::order_manager::TradeState::ForceExit { .. }) {
+                            if let Some(mid_ref) = book_mgr.mids.get(&pos.coin) {
+                                let mid_dec = Decimal::try_from(*mid_ref).unwrap_or_default();
+                                let reason = if let gbot::execution::order_manager::TradeState::ForceExit { reason } = order_mgr.state(&pos.coin) {
+                                    reason.clone()
+                                } else {
+                                    "force_exit".to_string()
+                                };
+                                dry_exits.push((pos.coin.clone(), mid_dec, reason));
+                            }
+                            continue;
+                        }
                         if let Some(mid_ref) = book_mgr.mids.get(&pos.coin) {
                             let mid_dec = Decimal::try_from(*mid_ref).unwrap_or_default();
                             match pos.direction {
@@ -1050,6 +1068,7 @@ async fn main() -> Result<()> {
                             };
 
                             position_mgr.close_position(&coin, &reason, exit_price, cooldown_s);
+                            order_mgr.set_flat(&coin);
                             portfolio.record_pnl(Decimal::try_from(pnl_usd).unwrap_or_default());
                             closed_trades.push(trade_view);
                             metrics.open_positions.set(position_mgr.count() as i64);

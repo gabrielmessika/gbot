@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-04-01 — Fix force exit spam bug
+
+### Bug: ForceExitIoc fired every tick after max_hold timeout
+
+- **Symptom**: Once `max_hold_s` was exceeded, `[ORDER] Force exit` logged every ~1s (60+ lines) but position not closed in dry-run
+- **Root cause**: 3 issues combined:
+  1. `main.rs` max_hold check had no guard against state already being `ForceExit` → re-sent intent every tick
+  2. `ForceExitIoc` handler in `order_manager.rs` had no duplicate check → re-processed every time
+  3. Dry-run exit simulation only checked SL/TP hits, never handled `ForceExit` state → position never closed by force exit
+  4. After dry-run exit, `order_mgr` state was not reset to `Flat`
+
+### Fixes:
+- **order_manager.rs**: Early return in `ForceExitIoc` if state is already `ForceExit`
+- **order_manager.rs**: Added `set_flat()` public method for post-close state reset
+- **main.rs**: Guard max_hold and regime-forced exit blocks with `!matches!(state, ForceExit { .. })`
+- **main.rs**: Dry-run exit simulation now handles `ForceExit` state → closes position at current mid
+- **main.rs**: After any dry-run close, resets `order_mgr` state to `Flat`
+
+## 2026-04-01 — Backtest sizing réel + binary CLI (`src/bin/backtest.rs`)
+
+### Limitation supprimée : taille de position fixe 0.001 coin
+
+- **Avant** : taille hardcodée à `0.001 coin` → P&L en unités arbitraires, non comparables
+- **Après** : `RiskManager::compute_position_size()` utilisé à chaque trade
+  - `size_usd = equity × max_loss_per_trade_pct / sl_distance_pct`
+  - Capé par `max_leverage` (config) et `max_margin_usage_pct`
+  - Equity mise à jour après chaque trade fermé (trades suivants sized sur P&L réel)
+- `BacktestTrade` enrichi : `size_usd` (notional en $) + `leverage` (levier effectif utilisé)
+- `BacktestRunner::new()` prend maintenant `&Settings` pour accéder aux paramètres de risque
+
+### Binary CLI `cargo run --bin backtest`
+
+Commandes :
+```
+cargo run --bin backtest -- --date 2026-04-01
+cargo run --bin backtest -- --date 2026-04-01 --compare 30
+cargo run --bin backtest -- --coins BTC,ETH,SOL --equity 5000
+```
+Auto-détection des coins disponibles pour la date demandée. Affiche breakdown par coin avec `size_usd`, `leverage`, `adverse_5s%`, `MAE/MFE`.
+
 ## 2026-04-01 — Phases 7.4 / 7.5 / 7.6 implementation
 
 ### Phase 7.4 — Analyse offline Python (`scripts/analyze_dry_run.py`)

@@ -151,6 +151,51 @@ GBOT__EXCHANGE__WALLET_ADDRESS=0x... \
 cargo run --release
 ```
 
+### Backtest
+
+Le backtest rejoue les données L2 + trades enregistrées par le bot en mode `observation` ou `dry-run`.
+
+**Prérequis** : au moins une session de collecte complète dans `data/l2/{coin}/{date}.jsonl` et `data/trades/{coin}/{date}.jsonl`.
+
+```bash
+# Run standard — SL dynamique sur toutes les données disponibles pour aujourd'hui
+cargo run --bin backtest
+
+# Spécifier une date
+cargo run --bin backtest -- --date 2026-04-01
+
+# Comparer SL dynamique vs SL fixe 30 bps (impact de la phase 7.2)
+cargo run --bin backtest -- --date 2026-04-01 --compare 30
+
+# Limiter à un sous-ensemble de coins
+cargo run --bin backtest -- --date 2026-04-01 --coins BTC,ETH,SOL
+
+# Simuler avec un capital de départ différent
+cargo run --bin backtest -- --date 2026-04-01 --equity 5000
+
+# Aide
+cargo run --bin backtest -- --help
+```
+
+**Sizing** : identique au live — `size_usd = equity × max_loss_per_trade_pct / sl_distance_pct`, capé par `max_leverage` et `max_margin_usage_pct`. L'equity est mise à jour après chaque trade fermé.
+
+**Métriques produites** : Win Rate, P&L net, Avg size $ & levier, Max Drawdown, Adverse Selection (+5s), Fee drag, MAE/MFE moyen, ratio MAE/SL (> 1.0 = SL trop serré), breakdown par coin.
+
+### Analyse offline (Python)
+
+```bash
+# Rapport complet sur les signaux et données L2 du jour
+python scripts/analyze_dry_run.py --date 2026-04-01
+
+# Sauvegarder dans un fichier
+python scripts/analyze_dry_run.py --date 2026-04-01 --output report.txt
+
+# Données dans un répertoire non-standard
+python scripts/analyze_dry_run.py --data-dir /mnt/data
+```
+
+**Sections** : distributions features · corrélations Spearman (feature × mid_move à +5s/+10s/+30s) · adverse selection · sensibilité SL/TP paramétrique · performance par coin · performance par heure UTC · recommandations de calibration.
+
 ### Docker
 
 ```bash
@@ -250,6 +295,11 @@ Voir `docs/deployment.md` pour le détail.
 | 6 | Dry-run simulation (fill sim, journal, signals) | ✅ |
 | 7 | UI de monitoring (dashboard SSE + métriques) | ✅ |
 | 7.1 | Post dry-run fixes: book sanitization, OFI/aggression/maturity, dynamic SL/TP, direction confirmation | ✅ |
+| 7.2 | SL/TP dynamique basé sur realized_vol_30s (2.5× vol, clampé 15–80 bps, TP = SL × 2.0) | ✅ |
+| 7.3 | Direction confirmation : 3 ticks consécutifs requis avant signal | ✅ |
+| 7.4 | Analyse offline Python : distributions, corrélations, adverse selection, per-coin/heure | ✅ |
+| 7.5 | Entry timing pullback : micro-move → retrace → OFI confirmation avant entrée | ✅ |
+| 7.6 | Backtest amélioré : sizing réel (RiskManager), MAE/MFE, adverse selection, comparaison SL | ✅ |
 
 ## Données runtime (`data/`)
 

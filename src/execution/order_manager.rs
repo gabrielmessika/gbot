@@ -126,6 +126,11 @@ impl OrderManager {
         self.states.get(coin).unwrap_or(&TradeState::Flat)
     }
 
+    /// Reset a coin's trade state to Flat (used after dry-run exits).
+    pub fn set_flat(&mut self, coin: &str) {
+        self.states.insert(coin.to_string(), TradeState::Flat);
+    }
+
     /// Process an intent from the strategy, converting it into exchange actions.
     pub async fn process_intent(
         &mut self,
@@ -257,6 +262,10 @@ impl OrderManager {
                 size,
                 reason,
             } => {
+                // Prevent duplicate force exits (already in ForceExit state)
+                if matches!(self.state(&coin), TradeState::ForceExit { .. }) {
+                    return Ok(());
+                }
                 warn!("[ORDER] Force exit {} — direction={:?} reason: {}", coin, direction, reason);
                 if self.mode == BotMode::Live {
                     let meta = meta_store
