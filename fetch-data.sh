@@ -76,7 +76,7 @@ echo "========================================="
 echo ""
 
 # ---- Créer la structure locale ----
-mkdir -p "$LOCAL_DIR"/{l2,trades,features,signals,orders,fills,pnl,journal,logs}
+mkdir -p "$LOCAL_DIR"/{l2,trades,signals,journal,logs}
 
 # ---- Construire les filtres rsync ----
 build_include_filter() {
@@ -219,12 +219,8 @@ fetch_api_snapshot
 # Données par catégorie
 fetch_data "l2"        "Book L2"
 fetch_data "trades"    "Trade tape"
-fetch_data "features"  "Features calculées"
-fetch_data "signals"   "Signaux"
-fetch_data "orders"    "Ordres"
-fetch_data "fills"     "Fills"
-fetch_data "pnl"       "P&L timeline"
-fetch_data "journal"   "Journal (JSONL)"
+fetch_data "signals"   "Signaux + features"
+fetch_data "journal"   "Journal audit (JSONL)"
 fetch_data "logs"      "Logs applicatifs"
 
 # ---- Résumé ----
@@ -241,10 +237,11 @@ echo "  Dossier : $LOCAL_DIR/"
 echo "  Fichiers : $total_files"
 echo "  Taille : $total_size"
 echo ""
-echo "  Analyse avec DuckDB :"
-echo "    duckdb -c \"SELECT * FROM '$LOCAL_DIR/signals/*.parquet' LIMIT 10\""
+echo "  Analyse offline (script Python, zero dépendances) :"
+echo "    python scripts/analyze_dry_run.py --data-dir $LOCAL_DIR"
+echo "    python scripts/analyze_dry_run.py --data-dir $LOCAL_DIR --date $(date +%Y-%m-%d) --output report.txt"
 echo ""
-echo "  Ou Python :"
-echo "    import polars as pl"
-echo "    df = pl.read_parquet('$LOCAL_DIR/fills/*.parquet')"
+echo "  Backtest sur les données rapatriées :"
+echo "    cargo run --bin backtest -- --data-dir $LOCAL_DIR"
+echo "    cargo run --bin backtest -- --data-dir $LOCAL_DIR --compare 30"
 echo ""

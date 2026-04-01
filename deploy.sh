@@ -103,7 +103,10 @@ deploy_code() {
 build_image() {
     info "Build de l'image Docker sur le serveur (peut prendre quelques minutes)..."
 
-    ssh_gbot "cd ${DEPLOY_DIR} && docker build -t gbot . 2>&1 | tail -5"
+    if ! ssh_gbot "cd ${DEPLOY_DIR} && docker build -t gbot . 2>&1; echo \"__EXIT_\$?\"" | tee /dev/stderr | tail -1 | grep -q '__EXIT_0'; then
+        error "Le build Docker a échoué. Corrigez les erreurs ci-dessus puis relancez."
+        exit 1
+    fi
 
     ok "Image Docker buildée"
 }
@@ -149,7 +152,7 @@ start_container() {
     ssh_gbot "docker run -d \
         --name gbot \
         --restart unless-stopped \
-        -p 127.0.0.1:3000:3000 \
+        -p 3000:3000 \
         -v ${DEPLOY_DIR}/data:/app/data \
         -v ${DEPLOY_DIR}/logs:/app/logs \
         --log-driver json-file \
@@ -219,6 +222,8 @@ else
     echo "    docker run -d --name gbot --restart unless-stopped \\"
     echo "      -p 127.0.0.1:3000:3000 \\"
     echo "      -v ${DEPLOY_DIR}/data:/app/data \\"
+    echo "      -v ${DEPLOY_DIR}/logs:/app/logs \\"
+    echo "      --log-driver json-file --log-opt max-size=50m --log-opt max-file=10 \\"
     echo "      --env-file ${DEPLOY_DIR}/.env gbot"
 fi
 echo ""
