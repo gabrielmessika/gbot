@@ -151,6 +151,10 @@ start_container() {
         --restart unless-stopped \
         -p 127.0.0.1:3000:3000 \
         -v ${DEPLOY_DIR}/data:/app/data \
+        -v ${DEPLOY_DIR}/logs:/app/logs \
+        --log-driver json-file \
+        --log-opt max-size=50m \
+        --log-opt max-file=10 \
         --env-file ${DEPLOY_DIR}/.env \
         gbot"
 

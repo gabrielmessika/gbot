@@ -173,17 +173,28 @@ docker run -d --name gbot \
 
 ### Dashboard UI
 
-Single page verticale sans onglets, 4 zones toujours visibles :
+Single page avec **4 onglets** : Status (défaut), Positions, Books, Events.
 
-1. **Header** — Equity, Daily P&L, Drawdown, nombre de positions, indicateur live (vert/rouge/gris)
-2. **Carnet en temps réel** (gauche) — Par coin actif : spread, imbalance (barre [-1,+1]), micro-price, toxicité (jauge), régime (badge coloré), éligibilité ALO
-3. **Positions & Ordres** (droite) — Positions ouvertes avec P&L live, SL/TP, break-even, elapsed + ordres pending avec timer
-4. **Métriques session** — Fill rate, adverse selection, spread capture, queue lag, reconnects, kill-switch
-5. **Feed d'événements** — 30 derniers événements (fills, changements de régime, rejets risk, reconnects) colorés par type
+**Onglet Status** (vue par défaut) :
+- Santé du bot : mode, uptime, erreurs/warnings, dernière erreur
+- Performance session : total trades, wins/losses, win rate, P&L
+- Performance par période : ventilation 1h, 24h, 7j
+- Historique des trades fermés : coin, direction, entry/exit, P&L, raison de fermeture, break-even
+- Métriques : fill rate, adverse selection, spread capture, latence, reconnects, kill-switch
+
+**Header** (toujours visible) : equity, daily P&L, drawdown, positions ouvertes, uptime, indicateur SSE
+
+**Onglet Positions** : positions ouvertes avec P&L live, SL/TP, break-even + ordres en attente
+
+**Onglet Books** : carnet L2 par coin avec spread, imbalance, micro-price, toxicité, régime
+
+**Onglet Events** : 30 derniers événements (fills, régimes, rejets risk, reconnects)
 
 Stack : HTML + JS vanilla + CSS custom (dark theme). Pas de dépendance externe, pas de CDN. SSE unique, pas de polling.
 
-Accès : `http://localhost:3000` (local) ou via tunnel SSH (`ssh -L 3000:127.0.0.1:3000 gbot`). Voir `docs/deployment.md`.
+Accès : `http://localhost:3000` (local) ou via tunnel SSH (`ssh -L 3000:127.0.0.1:3000 gbot`).
+
+Voir `docs/deployment.md` section 3 pour le guide d'interprétation complet.
 
 ### Déploiement serveur (Hetzner)
 

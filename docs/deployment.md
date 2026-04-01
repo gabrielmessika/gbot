@@ -175,7 +175,137 @@ ssh -f -N -L 3000:127.0.0.1:3000 gbot
 
 ---
 
-## 3. Commandes utiles
+## 3. Dashboard UI — guide d'interprétation
+
+L'UI est une single page avec **4 onglets** : Status (défaut), Positions, Books, Events.
+
+Accès : `http://localhost:3000` (local) ou via tunnel SSH.
+
+### Header (toujours visible)
+
+| Élément | Description |
+|---------|-------------|
+| **Dot vert/rouge** | Connexion SSE au bot. Rouge = données stale (>5s) ou déconnecté |
+| **Mode badge** | DryRun (jaune), Live (vert), Observation (bleu) |
+| **Equity** | Equity courante (simulée en dry-run via `simulated_equity`) |
+| **Daily P&L** | P&L depuis le reset quotidien. Vert = positif, rouge = négatif |
+| **Drawdown** | Drawdown depuis le peak d'equity. >5% orange, >10% rouge |
+| **Positions** | Nombre de positions ouvertes |
+| **Uptime** | Temps écoulé depuis le démarrage du bot |
+
+### Onglet Status
+
+**Carte "Santé du bot"** :
+- **Indicateur ●** : vert = aucune erreur, orange = quelques erreurs, rouge = >5 erreurs
+- **Errors/Warnings** : compteurs depuis le démarrage. Chaque erreur d'ordre, timeout d'exit, échec de trigger = +1 error. Chaque échec d'equity fetch = +1 warning
+- **Dernière erreur** : message et timestamp de la dernière erreur critique (utile pour diagnostiquer sans lire les logs)
+
+**Carte "Performance Session"** :
+- **Trades** : nombre total de trades fermés depuis le démarrage
+- **Win / Loss** : ventilation. Un trade est "win" si son P&L USD > 0
+- **Win rate** : wins / total × 100%
+- **P&L total** : somme de tous les P&L des trades fermés
+
+**Tableau "Performance par période"** :
+- Décompte les trades fermés dans les fenêtres 1h, 24h, 7j
+- Utile pour voir si le bot est en phase avec le marché récent ou si la perf se dégrade
+
+**Historique des trades** :
+- Tableau des 50 derniers trades fermés, du plus récent au plus ancien
+- **P&L** : montant en $ et en %. Vert = gain, rouge = perte
+- **Raison** : pourquoi le trade a été fermé (SL hit, TP hit, max_hold timeout, regime exit, etc.)
+- **BE** : ✓ si le break-even a été activé pendant le trade (SL déplacé à l'entrée)
+- **Durée** : temps que le trade est resté ouvert
+
+**Métriques session** :
+| Métrique | Interprétation |
+|----------|----------------|
+| Fill rate | % d'ordres ALO qui ont été remplis (100% = parfait, <50% = ordres trop agressifs) |
+| Adverse selection | % de fills qui ont immédiatement bougé contre nous (>30% = toxicité flow élevée) |
+| Spread capture | Spread moyen capturé en bps (>0 = on capture le rebate) |
+| Queue lag p95 | Latence au 95e percentile pour le processing des messages WS. >100ms = problème |
+| WS reconnects | Nombre de reconnexions WebSocket depuis le démarrage. Normal : 0-2/jour |
+| Kill-switch | Nombre de déclenchements du circuit breaker (drawdown critique). Normal : 0 |
+
+### Onglet Positions
+
+- **Position ouverte** : bordure verte (long) ou rouge (short). P&L live recalculé à chaque tick
+- **SL/TP** : niveaux de stop-loss et take-profit effectifs sur l'exchange
+- **BE** : ✓ = le SL a été déplacé au prix d'entrée
+- **Elapsed** : temps depuis l'ouverture
+- **Ordres en attente** : ordres ALO pas encore remplis, avec timer. Si le timer expire, l'ordre est annulé
+
+### Onglet Books
+
+Un carnet par coin actif, mis à jour en temps réel :
+| Champ | Interprétation |
+|-------|----------------|
+| Spread (bps) | <3 bps = serré (vert), 3-8 = OK (orange), >8 = large (rouge) |
+| Micro-price (bps) | Déviation vs mid. Si persistamment positif = pression acheteuse |
+| Imbalance | Barre [-1,+1]. Vert = plus de bids, rouge = plus d'asks |
+| Toxicity | Jauge 0-1. <0.4 = safe (vert), 0.4-0.7 = prudence (orange), >0.7 = flow toxique (rouge) |
+| Régime | Badge coloré indiquant le régime de marché classifié (QuietTight = idéal, DoNotTrade = interdit) |
+| ALO: ✓/✗ | Éligible pour un ordre ALO (maker). ✗ = régime interdit ou spread trop large |
+
+### Onglet Events
+
+Feed des 30 derniers événements colorés par type :
+- **Bleu (fill)** : entrée ou sortie remplie
+- **Violet (regime)** : changement de régime d'un coin
+- **Rouge (risk)** : rejet du risk manager ou erreur d'ordre
+- **Orange (system)** : reconnexion WS, kill-switch
+- **Gris (order)** : placement d'un nouvel ordre
+
+---
+
+## 4. Logs et diagnostics
+
+### Logs applicatifs
+
+Le bot écrit ses logs simultanément sur :
+1. **stdout** (JSON, capturé par Docker) — logs éphémères
+2. **Fichiers rotatifs** dans `data/logs/` — persistés sur disque
+
+Les fichiers de log sont en rotation quotidienne (via `tracing-appender`) :
+```
+data/logs/
+├── gbot.log.2026-04-01    — log du jour
+├── gbot.log.2026-03-31    — log de la veille
+├── gbot.log.2026-03-30    — etc.
+└── ...
+```
+
+Les logs Docker sont aussi limités à 50 Mo × 10 fichiers (500 Mo max total) via `--log-opt` dans `deploy.sh`.
+
+### Chercher dans les logs
+
+```bash
+# Sur le serveur — logs Docker (éphémères)
+docker logs --tail 200 gbot
+docker logs gbot 2>&1 | grep 'ORDER'
+
+# Sur le serveur — fichiers persistés
+grep 'error\|ORDER' /opt/gbot/data/logs/gbot.log.*
+
+# En local après fetch-data.sh
+grep 'RISK' server-data/logs/gbot.log.*
+```
+
+### Récupérer les logs en local
+
+```bash
+# Tout récupérer (logs + données)
+./fetch-data.sh --all
+
+# Uniquement les logs Docker actuels
+./fetch-data.sh --logs-only
+```
+
+`fetch-data.sh` récupère à la fois les logs Docker (`docker logs gbot`) et les fichiers de logs persistés (`data/logs/`).
+
+---
+
+## 5. Commandes utiles
 
 ### Logs
 
@@ -242,7 +372,7 @@ Analyse ensuite avec DuckDB ou Python/Polars :
 duckdb -c "SELECT * FROM 'server-data/fills/*.parquet' LIMIT 20"
 ```
 
-### Données
+## 6. Données
 
 Les données sont persistées dans `/opt/gbot/data/` (volume Docker) :
 
@@ -255,12 +385,13 @@ data/
 ├── orders/{date}.parquet        — Placed orders
 ├── fills/{date}.parquet         — Executed fills
 ├── pnl/{date}.parquet           — P&L timeline
-└── journal/journal_{ts}.jsonl   — Order journal (JSONL debug)
+├── journal/journal_{ts}.jsonl   — Order journal (JSONL debug)
+└── logs/gbot.log.{date}         — Logs applicatifs (rotation quotidienne)
 ```
 
 ---
 
-## 4. Backtest
+## 7. Backtest
 
 ```bash
 # Run backtest on recorded data
@@ -272,7 +403,7 @@ cargo run --release -- --convert-parquet --coin BTC --date 2024-11-15
 
 ---
 
-## 5. Sécurité
+## 8. Sécurité
 
 - **Jamais** exposer le port 3000 publiquement — toujours `127.0.0.1` + tunnel SSH
 - Les secrets sont dans `/opt/gbot/.env` avec permissions `600`

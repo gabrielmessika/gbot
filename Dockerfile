@@ -21,7 +21,7 @@ COPY --from=builder /app/target/release/gbot .
 COPY config/ ./config/
 COPY static/ ./static/
 
-RUN mkdir -p data/l2 data/trades data/features data/signals data/orders data/fills data/pnl data/journal
+RUN mkdir -p data/l2 data/trades data/features data/signals data/orders data/fills data/pnl data/journal data/logs
 
 EXPOSE 3000
 

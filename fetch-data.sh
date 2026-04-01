@@ -225,6 +225,7 @@ fetch_data "orders"    "Ordres"
 fetch_data "fills"     "Fills"
 fetch_data "pnl"       "P&L timeline"
 fetch_data "journal"   "Journal (JSONL)"
+fetch_data "logs"      "Logs applicatifs"
 
 # ---- Résumé ----
 echo ""
