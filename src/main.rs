@@ -23,7 +23,8 @@ use gbot::observability::dashboard::{
     MetricsView, PendingOrderView, PositionView,
 };
 use gbot::observability::metrics::Metrics;
-use gbot::persistence::journal::Journal;
+use gbot::persistence::journal::{Journal, JournalEvent};
+use gbot::persistence::signal_recorder::{SignalRecord, SignalRecorder};
 use gbot::portfolio::state::PortfolioState;
 use gbot::regime::engine as regime_engine;
 use gbot::risk::manager::RiskManager;
@@ -138,7 +139,8 @@ async fn main() -> Result<()> {
         &coins,
         settings.recording.enabled,
     );
-    let _journal = Journal::new(&settings.general.data_dir)?;
+    let journal = Journal::new(&settings.general.data_dir)?;
+    let signal_recorder = SignalRecorder::new(&settings.general.data_dir)?;
     let metrics = Arc::new(Metrics::new());
     let strategy = MfdpStrategy::new(settings.strategy.clone());
     let mut risk_mgr = RiskManager::new(settings.risk.clone(), initial_equity);
@@ -205,6 +207,23 @@ async fn main() -> Result<()> {
     let mut reconnect_recent = false;
     let mut reconnect_clear_at: i64 = 0;
     let cooldown_s = settings.risk.cooldown_after_close_s;
+
+    // ── Per-coin signal cooldown (prevents re-emitting same signal every tick) ──
+    let mut signal_cooldowns: HashMap<String, i64> = HashMap::new();
+    let signal_cooldown_ms: i64 = 30_000; // 30s cooldown per coin after signal
+
+    // ── Periodic summary tracking ──
+    let summary_interval_ms: i64 = 300_000; // every 5 minutes
+    let mut last_summary_ms: i64 = 0;
+    let mut signals_since_summary: u32 = 0;
+    let mut orders_since_summary: u32 = 0;
+    let mut rejections_since_summary: u32 = 0;
+    let mut fills_since_summary: u32 = 0;
+
+    // ── Dry-run fill simulation tracking ──
+    // In dry-run: when mid crosses the entry price, simulate a fill
+    // We track pending dry-run orders to check mid crossing
+    let is_dry_run = settings.general.mode == BotMode::DryRun;
 
     // ── Dashboard state ──
     let mut regimes: HashMap<String, regime_engine::Regime> = HashMap::new();
@@ -375,9 +394,16 @@ async fn main() -> Result<()> {
                                 order_mgr.state(coin),
                                 gbot::execution::order_manager::TradeState::Flat
                             );
-                            if is_flat && position_mgr.get(coin).is_none() && regime.allows_entry() {
+
+                            // Signal cooldown: skip if this coin emitted a signal recently
+                            let in_signal_cooldown = signal_cooldowns
+                                .get(coin)
+                                .map(|&cd_until| now_ms < cd_until)
+                                .unwrap_or(false);
+
+                            if is_flat && position_mgr.get(coin).is_none() && regime.allows_entry() && !in_signal_cooldown {
                                 if let Some(book) = book_mgr.books.get(coin) {
-                                    let raw_intent = match regime {
+                                    let (raw_intent, dir_score, queue_score) = match regime {
                                         regime_engine::Regime::QuietThin => {
                                             strategy.evaluate_with_reduced_size(
                                                 coin, &features, regime, &book,
@@ -419,6 +445,19 @@ async fn main() -> Result<()> {
                                     };
 
                                     if !matches!(sized_intent, Intent::NoTrade) {
+                                        // Set signal cooldown for this coin
+                                        signal_cooldowns.insert(coin.clone(), now_ms + signal_cooldown_ms);
+                                        signals_since_summary += 1;
+
+                                        // Build signal record for persistence
+                                        let (sig_coin, sig_dir, sig_price, sig_sl, sig_tp) = if let Intent::PlacePassiveEntry {
+                                            ref coin, direction, price, stop_loss, take_profit, ..
+                                        } = sized_intent {
+                                            (coin.clone(), format!("{:?}", direction), price.to_string(), stop_loss.to_string(), take_profit.to_string())
+                                        } else {
+                                            (coin.clone(), String::new(), String::new(), String::new(), String::new())
+                                        };
+
                                         match risk_mgr.validate_intent(
                                             &sized_intent,
                                             current_equity,
@@ -426,14 +465,57 @@ async fn main() -> Result<()> {
                                             &position_mgr,
                                         ) {
                                             Ok(()) => {
+                                                orders_since_summary += 1;
                                                 event_feed.push("order", format!(
                                                     "{} entry placed", coin
                                                 ));
+
+                                                // Journal: order placed
+                                                if let Intent::PlacePassiveEntry {
+                                                    ref coin, direction, price, size, ..
+                                                } = sized_intent {
+                                                    journal.log_event(&JournalEvent::OrderPlaced {
+                                                        ts_local: now_ms,
+                                                        coin: coin.clone(),
+                                                        direction: format!("{:?}", direction),
+                                                        price: price.to_string(),
+                                                        size: size.to_string(),
+                                                        tif: "ALO".to_string(),
+                                                        client_oid: String::new(), // filled by order_mgr
+                                                    });
+                                                }
+
+                                                // Signal record: placed
+                                                signal_recorder.record(&SignalRecord {
+                                                    ts: now_ms,
+                                                    coin: sig_coin,
+                                                    direction: sig_dir,
+                                                    dir_score,
+                                                    queue_score,
+                                                    entry_price: sig_price,
+                                                    stop_loss: sig_sl,
+                                                    take_profit: sig_tp,
+                                                    spread_bps: features.book.spread_bps,
+                                                    imbalance_top5: features.book.imbalance_top5,
+                                                    depth_ratio: features.book.depth_ratio,
+                                                    micro_price_vs_mid_bps: features.book.micro_price_vs_mid_bps,
+                                                    vamp_signal_bps: features.book.vamp_signal_bps,
+                                                    bid_depth_10bps: features.book.bid_depth_10bps,
+                                                    ask_depth_10bps: features.book.ask_depth_10bps,
+                                                    ofi_10s: features.flow.ofi_10s,
+                                                    toxicity: features.flow.toxicity_proxy_instant,
+                                                    vol_ratio: features.flow.vol_ratio,
+                                                    aggression: features.flow.aggression_persistence,
+                                                    trade_intensity: features.flow.trade_intensity,
+                                                    action: "placed".to_string(),
+                                                    rejection_reason: None,
+                                                });
+
                                                 if let Err(e) = order_mgr
                                                     .process_intent(sized_intent, &rest, &meta_store)
                                                     .await
                                                 {
-                                                            error!("[MAIN] Order error for {}: {}", coin, e);
+                                                    error!("[MAIN] Order error for {}: {}", coin, e);
                                                     risk_mgr.record_error();
                                                     error_count += 1;
                                                     last_error = format!("Order error {}: {}", coin, e);
@@ -444,9 +526,44 @@ async fn main() -> Result<()> {
                                                 }
                                             }
                                             Err(reasons) => {
+                                                rejections_since_summary += 1;
                                                 for r in &reasons {
                                                     info!("[RISK] Rejected {}: {}", coin, r);
                                                 }
+
+                                                // Journal: risk rejection
+                                                journal.log_event(&JournalEvent::RiskRejection {
+                                                    ts_local: now_ms,
+                                                    coin: coin.clone(),
+                                                    reasons: reasons.clone(),
+                                                });
+
+                                                // Signal record: rejected
+                                                signal_recorder.record(&SignalRecord {
+                                                    ts: now_ms,
+                                                    coin: sig_coin,
+                                                    direction: sig_dir,
+                                                    dir_score,
+                                                    queue_score,
+                                                    entry_price: sig_price,
+                                                    stop_loss: sig_sl,
+                                                    take_profit: sig_tp,
+                                                    spread_bps: features.book.spread_bps,
+                                                    imbalance_top5: features.book.imbalance_top5,
+                                                    depth_ratio: features.book.depth_ratio,
+                                                    micro_price_vs_mid_bps: features.book.micro_price_vs_mid_bps,
+                                                    vamp_signal_bps: features.book.vamp_signal_bps,
+                                                    bid_depth_10bps: features.book.bid_depth_10bps,
+                                                    ask_depth_10bps: features.book.ask_depth_10bps,
+                                                    ofi_10s: features.flow.ofi_10s,
+                                                    toxicity: features.flow.toxicity_proxy_instant,
+                                                    vol_ratio: features.flow.vol_ratio,
+                                                    aggression: features.flow.aggression_persistence,
+                                                    trade_intensity: features.flow.trade_intensity,
+                                                    action: "risk_rejected".to_string(),
+                                                    rejection_reason: Some(reasons.join("; ")),
+                                                });
+
                                                 event_feed.push("risk", format!(
                                                     "{} rejected: {}", coin, reasons.join(", ")
                                                 ));
@@ -502,6 +619,7 @@ async fn main() -> Result<()> {
                                         // on_fill returns Some(FillEvent) on full fill
                                         match order_mgr.on_fill(oid, avg_px, filled_qty) {
                                             Some(FillEvent::EntryFilled(filled)) => {
+                                                fills_since_summary += 1;
                                                 // ── Open position + place SL/TP triggers (fixes gap #2) ──
                                                 let asset_idx = meta_store
                                                     .get(&filled.coin)
@@ -523,6 +641,28 @@ async fn main() -> Result<()> {
                                                     sl_trigger_oid: None,
                                                     client_oid: filled.client_oid.clone(),
                                                 };
+
+                                                // Journal: entry fill + position opened
+                                                journal.log_event(&JournalEvent::OrderFilled {
+                                                    ts_local: now_ms,
+                                                    ts_exchange: None,
+                                                    coin: filled.coin.clone(),
+                                                    oid: filled.client_oid.clone(),
+                                                    fill_price: filled.fill_price.to_string(),
+                                                    fill_size: filled.size.to_string(),
+                                                    latency_ms: None,
+                                                });
+                                                journal.log_event(&JournalEvent::PositionOpened {
+                                                    ts_local: now_ms,
+                                                    coin: filled.coin.clone(),
+                                                    direction: format!("{:?}", filled.direction),
+                                                    entry_price: filled.fill_price.to_string(),
+                                                    stop_loss: filled.stop_loss.to_string(),
+                                                    take_profit: filled.take_profit.to_string(),
+                                                    size: filled.size.to_string(),
+                                                    leverage: filled.leverage,
+                                                });
+
                                                 if let Err(e) = position_mgr
                                                     .open_position_with_triggers(
                                                         pos,
@@ -556,6 +696,7 @@ async fn main() -> Result<()> {
                                             }
 
                                             Some(FillEvent::ExitFilled(closed)) => {
+                                                fills_since_summary += 1;
                                                 // Capture position data before closing
                                                 let trade_view = if let Some(pos) = position_mgr.get(&closed.coin) {
                                                     let entry_f = pos.entry_price.to_string().parse::<f64>().unwrap_or(0.0);
@@ -570,6 +711,18 @@ async fn main() -> Result<()> {
                                                     } else {
                                                         (0.0, 0.0)
                                                     };
+
+                                                    // Journal: position closed
+                                                    journal.log_event(&JournalEvent::PositionClosed {
+                                                        ts_local: now_ms,
+                                                        coin: pos.coin.clone(),
+                                                        direction: format!("{:?}", pos.direction),
+                                                        entry_price: pos.entry_price.to_string(),
+                                                        exit_price: closed.fill_price.to_string(),
+                                                        pnl: format!("{:.2}", pnl_usd),
+                                                        reason: closed.reason.clone(),
+                                                    });
+
                                                     Some(ClosedTradeView {
                                                         coin: pos.coin.clone(),
                                                         direction: format!("{:?}", pos.direction),
@@ -655,13 +808,209 @@ async fn main() -> Result<()> {
                 // ── Order timeout sweep ──
                 let timeouts = order_mgr.check_timeouts(now_ms);
                 for intent in timeouts {
+                    // Journal: order cancelled (timeout)
+                    if let Intent::CancelEntry { ref oid, ref reason } = intent {
+                        if let Some(order) = order_mgr.pending_orders().get(oid) {
+                            journal.log_event(&JournalEvent::OrderCancelled {
+                                ts_local: now_ms,
+                                coin: order.coin.clone(),
+                                oid: oid.clone(),
+                                reason: reason.clone(),
+                            });
+                        }
+                    }
                     if let Err(e) = order_mgr.process_intent(intent, &rest, &meta_store).await {
                         error!("[MAIN] Timeout cancel error: {}", e);
                     }
                 }
 
+                // ── Dry-run fill simulation ──
+                // When mid price crosses a pending entry order price, simulate the fill
+                if is_dry_run {
+                    let mut simulated_fills: Vec<(String, Decimal, Decimal)> = Vec::new();
+                    for (oid, order) in order_mgr.pending_orders() {
+                        if order.status != gbot::execution::order_manager::PendingOrderStatus::Working {
+                            continue;
+                        }
+                        if let Some(mid_ref) = book_mgr.mids.get(&order.coin) {
+                            let mid_dec = Decimal::try_from(*mid_ref).unwrap_or_default();
+                            // Long: fill when mid <= entry price (passive bid)
+                            // Short: fill when mid >= entry price (passive ask)
+                            let should_fill = match order.direction {
+                                gbot::strategy::signal::Direction::Long => mid_dec <= order.price,
+                                gbot::strategy::signal::Direction::Short => mid_dec >= order.price,
+                            };
+                            if should_fill {
+                                simulated_fills.push((oid.clone(), order.price, order.size));
+                            }
+                        }
+                    }
+                    for (oid, fill_price, fill_qty) in simulated_fills {
+                        info!("[DRYFILL] Simulated fill: {} @ {}", oid, fill_price);
+                        match order_mgr.on_fill(&oid, fill_price, fill_qty) {
+                            Some(FillEvent::EntryFilled(filled)) => {
+                                fills_since_summary += 1;
+                                let pos = OpenPosition {
+                                    coin: filled.coin.clone(),
+                                    direction: filled.direction,
+                                    entry_price: filled.fill_price,
+                                    size: filled.size,
+                                    stop_loss: filled.stop_loss,
+                                    take_profit: filled.take_profit,
+                                    original_stop_loss: filled.stop_loss,
+                                    leverage: filled.leverage,
+                                    opened_at: now_ms,
+                                    break_even_applied: false,
+                                    trailing_tier: 0,
+                                    tp_trigger_oid: None,
+                                    sl_trigger_oid: None,
+                                    client_oid: filled.client_oid.clone(),
+                                };
+
+                                // Journal: position opened
+                                journal.log_event(&JournalEvent::PositionOpened {
+                                    ts_local: now_ms,
+                                    coin: filled.coin.clone(),
+                                    direction: format!("{:?}", filled.direction),
+                                    entry_price: filled.fill_price.to_string(),
+                                    stop_loss: filled.stop_loss.to_string(),
+                                    take_profit: filled.take_profit.to_string(),
+                                    size: filled.size.to_string(),
+                                    leverage: filled.leverage,
+                                });
+
+                                // In dry-run, skip trigger placement — just open position directly
+                                position_mgr.open_position(pos);
+
+                                let notional = filled.fill_price * filled.size;
+                                let fee = notional * Decimal::try_from(0.00015_f64).unwrap_or_default();
+                                portfolio.record_fee(fee);
+                                metrics.passive_fill_count.inc();
+                                metrics.open_positions.set(position_mgr.count() as i64);
+                                event_feed.push("fill", format!(
+                                    "[DRY] {} {:?} filled @ {} (size={})",
+                                    filled.coin, filled.direction, filled.fill_price, filled.size
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // ── Dry-run position exit simulation ──
+                    // Check if mid hit SL or TP for any open position
+                    let mut dry_exits: Vec<(String, Decimal, String)> = Vec::new();
+                    for pos in position_mgr.all().values() {
+                        if let Some(mid_ref) = book_mgr.mids.get(&pos.coin) {
+                            let mid_dec = Decimal::try_from(*mid_ref).unwrap_or_default();
+                            match pos.direction {
+                                gbot::strategy::signal::Direction::Long => {
+                                    if mid_dec >= pos.take_profit {
+                                        dry_exits.push((pos.coin.clone(), pos.take_profit, "TP_HIT".to_string()));
+                                    } else if mid_dec <= pos.stop_loss {
+                                        dry_exits.push((pos.coin.clone(), pos.stop_loss, "SL_HIT".to_string()));
+                                    }
+                                }
+                                gbot::strategy::signal::Direction::Short => {
+                                    if mid_dec <= pos.take_profit {
+                                        dry_exits.push((pos.coin.clone(), pos.take_profit, "TP_HIT".to_string()));
+                                    } else if mid_dec >= pos.stop_loss {
+                                        dry_exits.push((pos.coin.clone(), pos.stop_loss, "SL_HIT".to_string()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (coin, exit_price, reason) in dry_exits {
+                        if let Some(pos) = position_mgr.get(&coin) {
+                            let entry_f = pos.entry_price.to_string().parse::<f64>().unwrap_or(0.0);
+                            let exit_f = exit_price.to_string().parse::<f64>().unwrap_or(0.0);
+                            let size_f = pos.size.to_string().parse::<f64>().unwrap_or(0.0);
+                            let (pnl_pct, pnl_usd) = if entry_f > 0.0 {
+                                let diff = match pos.direction {
+                                    gbot::strategy::signal::Direction::Long => exit_f - entry_f,
+                                    gbot::strategy::signal::Direction::Short => entry_f - exit_f,
+                                };
+                                (diff / entry_f * 100.0, diff * size_f)
+                            } else {
+                                (0.0, 0.0)
+                            };
+
+                            info!(
+                                "[DRYFILL] {} closed: {} @ {} | P&L: ${:.2} ({:.2}%)",
+                                coin, reason, exit_price, pnl_usd, pnl_pct
+                            );
+
+                            // Journal: position closed
+                            journal.log_event(&JournalEvent::PositionClosed {
+                                ts_local: now_ms,
+                                coin: coin.clone(),
+                                direction: format!("{:?}", pos.direction),
+                                entry_price: pos.entry_price.to_string(),
+                                exit_price: exit_price.to_string(),
+                                pnl: format!("{:.2}", pnl_usd),
+                                reason: reason.clone(),
+                            });
+
+                            let trade_view = ClosedTradeView {
+                                coin: pos.coin.clone(),
+                                direction: format!("{:?}", pos.direction),
+                                entry_price: entry_f,
+                                exit_price: exit_f,
+                                pnl_usd,
+                                pnl_pct,
+                                close_reason: reason.clone(),
+                                opened_at: pos.opened_at,
+                                closed_at: now_ms,
+                                hold_s: (now_ms - pos.opened_at) / 1000,
+                                break_even_applied: pos.break_even_applied,
+                            };
+
+                            position_mgr.close_position(&coin, &reason, exit_price, cooldown_s);
+                            portfolio.record_pnl(Decimal::try_from(pnl_usd).unwrap_or_default());
+                            closed_trades.push(trade_view);
+                            metrics.open_positions.set(position_mgr.count() as i64);
+
+                            // Update simulated equity in dry-run
+                            current_equity += Decimal::try_from(pnl_usd).unwrap_or_default();
+                            risk_mgr.update_equity(current_equity);
+
+                            event_feed.push("fill", format!(
+                                "[DRY] {} closed {} @ {} P&L ${:.2}",
+                                coin, reason, exit_price, pnl_usd
+                            ));
+                        }
+                    }
+                }
+
                 // ── Circuit breaker ──
                 risk_mgr.check_circuit_breaker(current_equity);
+
+                // ── Periodic summary (every 5 minutes) ──
+                if now_ms - last_summary_ms >= summary_interval_ms {
+                    let uptime_min = (now_ms - started_at_ms) / 60_000;
+                    let total_closed = closed_trades.len();
+                    let total_pnl: f64 = closed_trades.iter().map(|t| t.pnl_usd).sum();
+                    let total_wins = closed_trades.iter().filter(|t| t.pnl_usd > 0.0).count();
+                    let wr = if total_closed > 0 { total_wins as f64 / total_closed as f64 * 100.0 } else { 0.0 };
+                    info!(
+                        "[SUMMARY] Uptime={}min | Equity=${} | Positions={} | Closed={} (WR={:.0}%) | P&L=${:.2} | Since last: signals={} orders={} rejected={} fills={}",
+                        uptime_min,
+                        current_equity,
+                        position_mgr.count(),
+                        total_closed,
+                        wr,
+                        total_pnl,
+                        signals_since_summary,
+                        orders_since_summary,
+                        rejections_since_summary,
+                        fills_since_summary,
+                    );
+                    signals_since_summary = 0;
+                    orders_since_summary = 0;
+                    rejections_since_summary = 0;
+                    fills_since_summary = 0;
+                    last_summary_ms = now_ms;
+                }
 
                 // ── Metrics snapshot ──
                 metrics.open_positions.set(position_mgr.count() as i64);

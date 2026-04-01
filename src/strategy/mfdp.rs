@@ -23,20 +23,22 @@ impl MfdpStrategy {
     /// Evaluate features and regime to produce an Intent.
     /// The returned `PlacePassiveEntry` carries `stop_loss` and `take_profit` so
     /// main.rs can compute position size via RiskManager before execution.
+    ///
+    /// Also returns `(direction_score, queue_score)` for logging/recording.
     pub fn evaluate(
         &self,
         coin: &str,
         features: &CoinFeatures,
         regime: Regime,
         book: &OrderBook,
-    ) -> Intent {
+    ) -> (Intent, f64, f64) {
         // Regime gate
         match regime {
             Regime::DoNotTrade
             | Regime::ActiveToxic
             | Regime::NewslikeChaos
             | Regime::WideSpread
-            | Regime::LowSignal => return Intent::NoTrade,
+            | Regime::LowSignal => return (Intent::NoTrade, 0.0, 0.0),
             _ => {}
         }
 
@@ -44,7 +46,7 @@ impl MfdpStrategy {
         let queue_score = self.compute_queue_score(features);
         if queue_score < self.settings.queue_score_threshold {
             debug!("[MFDP] {} queue_score {:.3} < threshold — skip", coin, queue_score);
-            return Intent::NoTrade;
+            return (Intent::NoTrade, 0.0, queue_score);
         }
 
         // Direction score
@@ -60,14 +62,14 @@ impl MfdpStrategy {
 
         let direction = match direction {
             Some(d) => d,
-            None => return Intent::NoTrade,
+            None => return (Intent::NoTrade, direction_score, queue_score),
         };
 
         // Determine entry / SL / TP price levels
         let (entry_price, stop_loss, take_profit) =
             match self.compute_levels(direction, book) {
                 Some(levels) => levels,
-                None => return Intent::NoTrade,
+                None => return (Intent::NoTrade, direction_score, queue_score),
             };
 
         info!(
@@ -84,8 +86,23 @@ impl MfdpStrategy {
             take_profit
         );
 
+        debug!(
+            "[MFDP] {} features: ofi_10s={:.3} micro_bps={:.2} vamp_bps={:.2} agg={:.2} depth_r={:.2} tox={:.2} spread={:.1}bps imb5={:.2} vol_r={:.2} intensity={:.1}",
+            coin,
+            features.flow.ofi_10s,
+            features.book.micro_price_vs_mid_bps,
+            features.book.vamp_signal_bps,
+            features.flow.aggression_persistence,
+            features.book.depth_ratio,
+            features.flow.toxicity_proxy_instant,
+            features.book.spread_bps,
+            features.book.imbalance_top5,
+            features.flow.vol_ratio,
+            features.flow.trade_intensity,
+        );
+
         // size = ZERO here; computed by main.rs via risk_mgr.compute_position_size()
-        Intent::PlacePassiveEntry {
+        (Intent::PlacePassiveEntry {
             coin: coin.to_string(),
             direction,
             price: entry_price,
@@ -93,7 +110,7 @@ impl MfdpStrategy {
             take_profit,
             size: Decimal::ZERO,
             max_wait_s: self.settings.max_wait_pullback_s,
-        }
+        }, direction_score, queue_score)
     }
 
     /// Evaluate with reduced size hint (for QuietThin regime).
@@ -104,7 +121,7 @@ impl MfdpStrategy {
         features: &CoinFeatures,
         regime: Regime,
         book: &OrderBook,
-    ) -> Intent {
+    ) -> (Intent, f64, f64) {
         self.evaluate(coin, features, regime, book)
     }
 

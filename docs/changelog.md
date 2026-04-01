@@ -1,5 +1,55 @@
 # Changelog
 
+## 2026-04-01 — Bugfixes prix d'ordre & doctest
+
+### Prix d'ordre incorrects pour DOGE, XRP, OP (bloquant)
+- **Cause** : `from_exchange_meta` utilisait `szDecimals` (précision des *tailles*) comme `tick_size` pour arrondir les *prix*. Sur Hyperliquid, `szDecimals=0` pour DOGE et XRP signifie "quantités en unités entières" — rien à voir avec le prix. `round_price_to_tick(0.0923, tick=1.0)` donnait `0` ; `round_price_to_tick(1.35, tick=1.0)` donnait `1`.
+- **Fix** : `round_price_to_tick` utilise désormais un arrondi à **5 chiffres significatifs** (convention Hyperliquid pour les prix), sans dépendre du paramètre `tick`. Exemples après fix : DOGE `0.092328` → `0.092328`, XRP `1.3504` → `1.3504`, BTC `68594` → `68594`.
+- **Fichier** : `src/config/coins.rs` — remplacement de `(price / tick).round() * tick` par `price.round_dp(dp)` avec `dp` calculé depuis `floor_log10(price)`.
+
+### Doctest cassé dans `backtest/runner.rs`
+- **Cause** : le bloc ` ``` ` du doc comment de `run_from_files` contenait un chemin de fichier (`data/l2/{coin}/...`) que `cargo test` tentait de compiler comme du code Rust → erreur de syntaxe.
+- **Fix** : annoté ` ```text ` pour indiquer que le bloc est du texte littéral, pas du code exécutable.
+- **Fichier** : `src/backtest/runner.rs`
+
+## 2026-04-01 — Observability & Dry-Run Simulation
+
+Après ~1h07 d'exécution en dry-run (683 signaux, 0 fills, 0 trades), ces lacunes ont été identifiées et corrigées :
+
+### Journal wired to events
+- `Journal` est maintenant thread-safe (`Mutex`) et branché sur tous les événements : OrderPlaced, OrderFilled, OrderCancelled, PositionOpened, PositionClosed, RiskRejection
+- Méthode `log_event()` ajoutée (best-effort, log warning on failure)
+- Suppression de la variable `_journal` — le journal est utilisé activement
+
+### Dry-run fill simulator
+- En mode DryRun, le mid price est comparé aux ordres pending :
+  - Long : fill quand mid ≤ entry price (bid passif touché)
+  - Short : fill quand mid ≥ entry price (ask passif touché)
+- Simulation complète de sorties SL/TP (mid vs stops)
+- Les positions simulées sont trackées, P&L calculé, equity mise à jour
+- Les trades fermés alimentent le dashboard et les stats
+
+### Per-coin signal cooldown (30s)
+- Après émission d'un signal pour un coin, 30s de cooldown avant de re-émettre
+- Évite le spam de signaux identiques (avant: BTC émettait 89 fois le même signal)
+- Réduit la charge de logs de ~10 signaux/s à ~1 toutes les 30s par coin
+
+### DEBUG feature logging
+- `evaluate()` émet un log `DEBUG` avec toutes les features individuelles pour chaque signal émis (OFI, micro-price, VAMP, aggression, depth, toxicité, spread, imbalance, vol_ratio, intensity)
+- Activable via `RUST_LOG=gbot::strategy::mfdp=debug`
+
+### Periodic summary (every 5 minutes)
+- Log `[SUMMARY]` émis toutes les 5 min avec : uptime, equity, positions ouvertes, trades fermés, win rate, P&L total, signaux/ordres/rejections/fills depuis le dernier résumé
+
+### Signal persistence (`data/signals/`)
+- Nouveau module `persistence::signal_recorder` — écrit chaque signal en JSONL avec le contexte complet : scores, features, prix entry/SL/TP, action (placed/risk_rejected), raison de rejet
+- Un fichier par jour : `data/signals/YYYY-MM-DD.jsonl`
+
+### API change (`MfdpStrategy::evaluate`)
+- `evaluate()` retourne maintenant `(Intent, f64, f64)` — l'intent + dir_score + queue_score
+- `evaluate_with_reduced_size()` mis à jour de même
+- `BacktestRunner` adapté
+
 ## 2026-04-01 — Dashboard V2 + Logging persistant
 
 - **Dashboard V2** : 4 onglets (Status, Positions, Books, Events). Onglet Status = vue par défaut avec santé du bot, performance session, tableau par période (1h/24h/7j), historique des trades fermés (P&L, raison, break-even)

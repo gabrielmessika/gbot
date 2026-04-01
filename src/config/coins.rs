@@ -78,9 +78,40 @@ impl CoinMetaStore {
     }
 }
 
-/// Round a price to the nearest valid tick.
-pub fn round_price_to_tick(price: Decimal, tick: Decimal) -> Decimal {
-    (price / tick).round() * tick
+/// Round a price to 5 significant figures (Hyperliquid price convention).
+/// The `tick` parameter is kept for API compatibility but is not used:
+/// Hyperliquid does not expose a price tick in its meta response — it enforces
+/// 5 significant figures on prices. Using szDecimals (lot size) as a price tick
+/// caused DOGE/XRP prices to round to 0 or 1 (szDecimals=0 → tick=1.0).
+pub fn round_price_to_tick(price: Decimal, _tick: Decimal) -> Decimal {
+    if price <= Decimal::ZERO {
+        return price;
+    }
+    let mag = floor_log10(price);
+    let dp = (4 - mag).max(0) as u32;
+    price.round_dp(dp)
+}
+
+/// Returns floor(log10(price)) for positive prices.
+/// Used to compute the number of decimal places for 5 significant figures.
+fn floor_log10(price: Decimal) -> i32 {
+    if price >= Decimal::ONE {
+        let mut mag = 0i32;
+        let mut p = price;
+        while p >= Decimal::TEN {
+            p /= Decimal::TEN;
+            mag += 1;
+        }
+        mag
+    } else {
+        let mut mag = 0i32;
+        let mut p = price;
+        while p < Decimal::ONE {
+            p *= Decimal::TEN;
+            mag -= 1;
+        }
+        mag
+    }
 }
 
 /// Round a size to the nearest valid lot (round down).

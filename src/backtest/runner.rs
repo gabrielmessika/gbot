@@ -35,7 +35,7 @@ impl BacktestRunner {
     /// Run a backtest from JSONL files recorded by the Recorder.
     ///
     /// Directory layout:
-    /// ```
+    /// ```text
     /// data/l2/{coin}/{YYYY-MM-DD}.jsonl
     /// data/trades/{coin}/{YYYY-MM-DD}.jsonl
     /// ```
@@ -197,7 +197,7 @@ impl BacktestRunner {
                 let features = CoinFeatures { book: book_feats, flow: flow_feats, timestamp: now_ms };
 
                 let regime = regime_engine::classify(&features, false, false, &settings.regime, None);
-                let intent = self.strategy.evaluate(coin, &features, regime, &book);
+                let (intent, _dir_score, _queue_score) = self.strategy.evaluate(coin, &features, regime, &book);
 
                 if let Intent::PlacePassiveEntry {
                     direction,

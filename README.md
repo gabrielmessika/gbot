@@ -57,7 +57,7 @@ Bot de trading algorithmique haute fréquence pour **Hyperliquid**, implémenté
 | `execution` | `order_manager.rs`, `position_manager.rs` | Machine à 10 états, lifecycle position (BE, trailing, sync exchange) |
 | `risk` | `manager.rs` | Veto absolu : 8 règles par trade, 7 règles portfolio, drawdown throttle/circuit breaker |
 | `portfolio` | `state.rs` | État interne : positions, PnL réalisé, fees, funding, marge |
-| `persistence` | `journal.rs`, `parquet_writer.rs` | Journal JSONL structuré, conversion Arrow/Parquet (`convert_book_jsonl`, `convert_trade_jsonl`) |
+| `persistence` | `journal.rs`, `signal_recorder.rs`, `parquet_writer.rs` | Journal JSONL structuré (thread-safe), signal recorder, conversion Arrow/Parquet |
 | `observability` | `metrics.rs`, `dashboard.rs` | 12 métriques Prometheus, dashboard HTTP (SSE temps réel, snapshot JSON) |
 | `backtest` | `replay_engine.rs`, `runner.rs`, `sim_book.rs`, `sim_execution.rs` | Replay de données JSONL enregistrées à travers le pipeline complet (features → régime → stratégie), fill probabiliste |
 
@@ -246,8 +246,18 @@ Voir `docs/deployment.md` pour le détail.
 | 3 | Strategy MFDP V1, sizing pipeline, SL/TP triggers | ✅ |
 | 4 | Position lifecycle complet (BE, trailing, sync, recovery) | ✅ |
 | 5 | Backtest sur données enregistrées (`BacktestRunner`) | ✅ |
-| 6 | Dry-run / Live trading (taille minimale) | 🔲 |
+| 6 | Dry-run simulation (fill sim, journal, signals) | ✅ |
 | 7 | UI de monitoring (dashboard SSE + métriques) | ✅ |
+
+## Données runtime (`data/`)
+
+| Répertoire | Format | Description |
+|---|---|---|
+| `data/l2/{coin}/YYYY-MM-DD.jsonl` | JSONL | Snapshots L2 (~0.5s) : best_bid/ask, depth 10bps, spread, mid |
+| `data/trades/{coin}/YYYY-MM-DD.jsonl` | JSONL | Trade tape tick-by-tick : price, size, is_buy |
+| `data/signals/YYYY-MM-DD.jsonl` | JSONL | Signaux MFDP avec features complètes, action (placed/risk_rejected), raison rejet |
+| `data/journal/journal_YYYY-MM-DD_HH-MM-SS.jsonl` | JSONL | Audit trail : OrderPlaced/Filled/Cancelled, PositionOpened/Closed, RiskRejection |
+| `data/logs/gbot.log.YYYY-MM-DD` | JSON | Logs applicatifs (rotation quotidienne) |
 
 ## Protections intégrées (leçons de t-bot)
 

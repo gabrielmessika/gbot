@@ -1,15 +1,18 @@
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::Result;
 use chrono::Utc;
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
 
 /// JSONL journal for orders and events (debug/audit fallback).
+/// Thread-safe: wraps file access in a Mutex so it can be shared across tasks.
 pub struct Journal {
     path: PathBuf,
+    lock: Mutex<()>,
 }
 
 impl Journal {
@@ -21,11 +24,15 @@ impl Journal {
         let path = dir.join(format!("journal_{}.jsonl", ts));
 
         info!("[JOURNAL] Writing to {}", path.display());
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            lock: Mutex::new(()),
+        })
     }
 
     /// Append a serializable event to the journal.
     pub fn write<T: Serialize>(&self, event: &T) -> Result<()> {
+        let _guard = self.lock.lock().map_err(|e| anyhow::anyhow!("journal lock: {}", e))?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -37,17 +44,11 @@ impl Journal {
         Ok(())
     }
 
-    /// Write a raw JSON string.
-    pub fn write_raw(&self, json_line: &str) -> Result<()> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        let mut writer = BufWriter::new(file);
-        writer.write_all(json_line.as_bytes())?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
-        Ok(())
+    /// Best-effort write — logs a warning on failure instead of propagating.
+    pub fn log_event<T: Serialize>(&self, event: &T) {
+        if let Err(e) = self.write(event) {
+            warn!("[JOURNAL] Failed to write event: {}", e);
+        }
     }
 }
 
