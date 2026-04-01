@@ -42,6 +42,20 @@ impl MfdpStrategy {
             _ => {}
         }
 
+        // Feature maturity gate: skip if insufficient data
+        if !features.flow.is_mature() {
+            debug!("[MFDP] {} features not mature (trades_10s={}, vol_30s={:.6}) — skip",
+                   coin, features.flow.trade_count_10s, features.flow.realized_vol_30s);
+            return (Intent::NoTrade, 0.0, 0.0);
+        }
+
+        // Book health gate: skip if spread is zero or negative (crossed book)
+        if features.book.spread_bps <= 0.0 {
+            debug!("[MFDP] {} spread_bps={:.1} (crossed or empty book) — skip",
+                   coin, features.book.spread_bps);
+            return (Intent::NoTrade, 0.0, 0.0);
+        }
+
         // Queue desirability score
         let queue_score = self.compute_queue_score(features);
         if queue_score < self.settings.queue_score_threshold {
@@ -65,9 +79,9 @@ impl MfdpStrategy {
             None => return (Intent::NoTrade, direction_score, queue_score),
         };
 
-        // Determine entry / SL / TP price levels
+        // Determine entry / SL / TP price levels (dynamic based on volatility)
         let (entry_price, stop_loss, take_profit) =
-            match self.compute_levels(direction, book) {
+            match self.compute_levels(direction, book, features.flow.realized_vol_30s) {
                 Some(levels) => levels,
                 None => return (Intent::NoTrade, direction_score, queue_score),
             };
@@ -142,12 +156,8 @@ impl MfdpStrategy {
         let micro_norm = (features.book.micro_price_vs_mid_bps / 5.0).clamp(-1.0, 1.0);
         let vamp_norm = (features.book.vamp_signal_bps / 5.0).clamp(-1.0, 1.0);
 
-        // Aggression persistence signed by OFI direction
-        let agg_signed = if features.flow.ofi_10s >= 0.0 {
-            features.flow.aggression_persistence
-        } else {
-            -features.flow.aggression_persistence
-        };
+        // Aggression persistence is now signed: +1 = all buys, -1 = all sells
+        let agg_signed = features.flow.aggression_persistence.clamp(-1.0, 1.0);
 
         // Depth ratio: > 1 = more bid depth = bullish
         let depth_signed = (features.book.depth_ratio - 1.0).clamp(-1.0, 1.0);
@@ -181,34 +191,50 @@ impl MfdpStrategy {
     }
 
     /// Compute entry, SL and TP price levels.
+    /// SL distance is dynamic, based on realized 30s volatility scaled by sl_vol_multiplier,
+    /// clamped between sl_min_bps and sl_max_bps. TP = SL × target_rr.
     fn compute_levels(
         &self,
         direction: Direction,
         book: &OrderBook,
+        realized_vol_30s: f64,
     ) -> Option<(Decimal, Decimal, Decimal)> {
         let best_bid = Decimal::try_from(book.best_bid()?).ok()?;
         let best_ask = Decimal::try_from(book.best_ask()?).ok()?;
 
+        // Dynamic SL: N× realized volatility, clamped to [min_bps, max_bps]
+        let sl_min_pct = self.settings.sl_min_bps / 10_000.0;
+        let sl_max_pct = self.settings.sl_max_bps / 10_000.0;
+        let vol_based_sl_pct = realized_vol_30s * self.settings.sl_vol_multiplier;
+        let sl_pct = vol_based_sl_pct.max(sl_min_pct).min(sl_max_pct);
+        let tp_pct = sl_pct * self.settings.target_rr;
+
+        let sl_mult = Decimal::try_from(sl_pct).unwrap_or(Decimal::new(15, 4)); // 0.0015 fallback
+        let tp_mult = Decimal::try_from(tp_pct).unwrap_or(Decimal::new(30, 4));
+
         let (entry, sl, tp) = match direction {
             Direction::Long => {
                 let entry = best_bid;
-                let sl_distance = entry
-                    * Decimal::try_from(self.settings.pullback_retrace_pct)
-                        .unwrap_or(Decimal::new(3, 3));
-                let sl = entry - sl_distance;
-                let tp = entry + sl_distance * Decimal::new(2, 0);
+                let sl = entry - entry * sl_mult;
+                let tp = entry + entry * tp_mult;
                 (entry, sl, tp)
             }
             Direction::Short => {
                 let entry = best_ask;
-                let sl_distance = entry
-                    * Decimal::try_from(self.settings.pullback_retrace_pct)
-                        .unwrap_or(Decimal::new(3, 3));
-                let sl = entry + sl_distance;
-                let tp = entry - sl_distance * Decimal::new(2, 0);
+                let sl = entry + entry * sl_mult;
+                let tp = entry - entry * tp_mult;
                 (entry, sl, tp)
             }
         };
+
+        debug!(
+            "[MFDP] SL/TP: vol_30s={:.6} → sl_pct={:.4}% tp_pct={:.4}% (min={:.4}% max={:.4}%)",
+            realized_vol_30s,
+            sl_pct * 100.0,
+            tp_pct * 100.0,
+            sl_min_pct * 100.0,
+            sl_max_pct * 100.0,
+        );
 
         Some((entry, sl, tp))
     }

@@ -132,6 +132,45 @@ pub struct StrategySettings {
     pub queue_w_depth: f64,
     pub queue_w_vol: f64,
     pub queue_score_threshold: f64,
+
+    // Dynamic SL/TP based on realized volatility
+    #[serde(default = "StrategySettings::default_sl_vol_multiplier")]
+    pub sl_vol_multiplier: f64,
+    #[serde(default = "StrategySettings::default_sl_min_bps")]
+    pub sl_min_bps: f64,
+    #[serde(default = "StrategySettings::default_sl_max_bps")]
+    pub sl_max_bps: f64,
+    #[serde(default = "StrategySettings::default_target_rr")]
+    pub target_rr: f64,
+
+    // Direction score confirmation: require N consecutive ticks above threshold
+    #[serde(default = "StrategySettings::default_min_direction_confirmations")]
+    pub min_direction_confirmations: u32,
+
+    // Minimum trades in 10s window before producing a signal
+    #[serde(default = "StrategySettings::default_min_trades_for_signal")]
+    pub min_trades_for_signal: usize,
+
+    // ── Phase 7.5: Pullback entry timing ──────────────────────────────────
+    // Minimum micro-move (bps) required to arm pullback wait.
+    #[serde(default = "StrategySettings::default_pullback_min_move_bps")]
+    pub pullback_min_move_bps: f64,
+
+    // OFI 10s threshold required after pullback for confirmation.
+    // Long: ofi_10s > threshold. Short: ofi_10s < -threshold.
+    #[serde(default = "StrategySettings::default_pullback_ofi_confirm")]
+    pub pullback_ofi_confirm: f64,
+}
+
+impl StrategySettings {
+    fn default_sl_vol_multiplier() -> f64 { 2.5 }
+    fn default_sl_min_bps() -> f64 { 15.0 }
+    fn default_sl_max_bps() -> f64 { 80.0 }
+    fn default_target_rr() -> f64 { 2.0 }
+    fn default_min_direction_confirmations() -> u32 { 3 }
+    fn default_min_trades_for_signal() -> usize { 5 }
+    fn default_pullback_min_move_bps() -> f64 { 3.0 }
+    fn default_pullback_ofi_confirm() -> f64 { 0.0 }
 }
 
 #[derive(Debug, Clone, Deserialize)]

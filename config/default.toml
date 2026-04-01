@@ -92,9 +92,11 @@ w_toxicity = 0.10
 direction_threshold_long = 0.5
 direction_threshold_short = -0.5
 
-# Pullback
-pullback_retrace_pct = 0.003   # 30-50% retrace of micro-move
-max_wait_pullback_s = 30
+# Pullback entry timing (Phase 7.5)
+pullback_retrace_pct = 0.35     # Enter after 35% retrace of the micro-move
+max_wait_pullback_s = 30        # Abandon if no pullback within 30s
+pullback_min_move_bps = 3.0     # Minimum micro-move (bps) to arm the pullback wait
+pullback_ofi_confirm = 0.0      # OFI 10s threshold post-pullback (0.0 = any directional OFI)
 
 # Queue desirability weights
 queue_w_spread = 0.25
@@ -103,6 +105,18 @@ queue_w_toxicity = 0.20
 queue_w_depth = 0.15
 queue_w_vol = 0.15
 queue_score_threshold = 0.3
+
+# Dynamic SL/TP — SL = max(sl_min_bps, sl_vol_multiplier × realized_vol_30s), capped at sl_max_bps
+sl_vol_multiplier = 2.5   # SL = 2.5× realized 30s volatility
+sl_min_bps = 15.0         # Minimum SL distance (15 bps floor)
+sl_max_bps = 80.0         # Maximum SL distance (80 bps cap)
+target_rr = 2.0           # TP = SL × target_rr
+
+# Direction confirmation — require N consecutive evaluations with score above threshold
+min_direction_confirmations = 3
+
+# Feature maturity — minimum trades in 10s window before producing a signal
+min_trades_for_signal = 5
 
 [risk]
 max_loss_per_trade_pct = 1.5

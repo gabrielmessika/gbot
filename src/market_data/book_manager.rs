@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::exchange::ws_client::{TradePrintData, WsEvent};
 use crate::market_data::book::{BookLevel, OrderBook};
@@ -104,6 +104,17 @@ impl BookManager {
                 );
             } else {
                 book.apply_delta(&bid_levels, &ask_levels, timestamp);
+
+                // Detect and warn on crossed book (sanitize_crossed is called inside apply_delta)
+                if book.is_crossed() {
+                    warn!(
+                        "[BOOK] {} book still crossed after sanitization (bid={:?} >= ask={:?}) — marking stale",
+                        coin,
+                        book.best_bid(),
+                        book.best_ask(),
+                    );
+                    self.book_stale.insert(coin.to_string(), true);
+                }
 
                 // Update cancel/add delta stats for this coin (fixes gap #7)
                 // "add" = level with size > 0 (new or updated)

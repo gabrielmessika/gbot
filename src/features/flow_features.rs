@@ -17,7 +17,7 @@ pub struct FlowFeatures {
     pub trade_intensity: f64,       // trades/sec over 10s window
     pub avg_trade_size: f64,
     pub large_trade_ratio: f64,     // % trades > 2× avg size
-    pub aggression_persistence: f64, // proportion of trades in same direction (last 10)
+    pub aggression_persistence: f64, // signed: buy dominance (+) vs sell dominance (-), range [-1, +1]
 
     // Realized volatility
     pub realized_vol_3s: f64,
@@ -34,6 +34,17 @@ pub struct FlowFeatures {
 
     // Cancel/add ratio (spoofing proxy)
     pub cancel_add_ratio: f64,
+
+    // Maturity indicators
+    pub trade_count_10s: usize,     // Number of trades in 10s window
+}
+
+impl FlowFeatures {
+    /// Whether the flow features have enough data to be meaningful for trading decisions.
+    /// Returns false if there are too few trades or no volatility data.
+    pub fn is_mature(&self) -> bool {
+        self.trade_count_10s >= 5 && self.realized_vol_30s > 0.0
+    }
 }
 
 /// Compute flow features from the trade tape.
@@ -71,12 +82,15 @@ pub fn compute_flow_features(tape: &VecDeque<TapeEntry>, now_ms: i64, cancel_add
         features.large_trade_ratio = large_count as f64 / window_10s.len() as f64;
     }
 
-    // Aggression persistence: proportion of last 10 trades in the same direction
+    features.trade_count_10s = window_10s.len();
+
+    // Aggression persistence: signed ratio of buy vs sell dominance in last 10 trades.
+    // Range: [-1, +1]. Positive = buy dominance, negative = sell dominance.
     let last_n: Vec<&TapeEntry> = tape.iter().rev().take(10).collect();
     if !last_n.is_empty() {
-        let buy_count = last_n.iter().filter(|t| t.is_buy).count();
-        let sell_count = last_n.len() - buy_count;
-        features.aggression_persistence = buy_count.max(sell_count) as f64 / last_n.len() as f64;
+        let buy_count = last_n.iter().filter(|t| t.is_buy).count() as f64;
+        let total = last_n.len() as f64;
+        features.aggression_persistence = (2.0 * buy_count - total) / total;
     }
 
     // ── Realized volatility ──
@@ -117,10 +131,16 @@ pub fn compute_flow_features(tape: &VecDeque<TapeEntry>, now_ms: i64, cancel_add
     features
 }
 
-/// OFI = (buy_vol - sell_vol) / (buy_vol + sell_vol) over a time window.
+/// OFI = (buy_vol - sell_vol) / (buy_vol + sell_vol) over a time window,
+/// scaled by trade count confidence to prevent saturation with few trades.
+/// When there are fewer than MIN_OFI_TRADES trades, the OFI magnitude is reduced
+/// proportionally, preventing a single large trade from saturating OFI to ±1.
+const MIN_OFI_TRADES: usize = 5;
+
 fn compute_ofi(tape: &VecDeque<TapeEntry>, now_ms: i64, window_ms: i64) -> f64 {
     let mut buy_vol = 0.0;
     let mut sell_vol = 0.0;
+    let mut trade_count: usize = 0;
 
     for entry in tape.iter().rev() {
         if now_ms - entry.timestamp > window_ms {
@@ -131,13 +151,18 @@ fn compute_ofi(tape: &VecDeque<TapeEntry>, now_ms: i64, window_ms: i64) -> f64 {
         } else {
             sell_vol += entry.size;
         }
+        trade_count += 1;
     }
 
     let total = buy_vol + sell_vol;
     if total == 0.0 {
         return 0.0;
     }
-    (buy_vol - sell_vol) / total
+    let raw_ofi = (buy_vol - sell_vol) / total;
+
+    // Confidence scaling: reduce magnitude when few trades to prevent saturation
+    let confidence = (trade_count as f64 / MIN_OFI_TRADES as f64).min(1.0);
+    raw_ofi * confidence
 }
 
 /// Realized volatility: std dev of log returns over a time window.

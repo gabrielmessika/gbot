@@ -71,11 +71,12 @@ Bot de trading algorithmique haute fréquence pour **Hyperliquid**, implémenté
 - VAMP (Volume-Adjusted Mid Price) et signal VAMP (bps)
 
 ### Flow Features (fenêtres glissantes)
-- OFI (Order Flow Imbalance) à 1s, 3s, 10s, 30s
-- Intensité de trades, taille moyenne, ratio gros trades
-- Persistence d'agression (séries consécutives)
+- OFI (Order Flow Imbalance) à 1s, 3s, 10s, 30s — confidence-scaled quand < 5 trades
+- Intensité de trades, nombre de trades 10s, taille moyenne, ratio gros trades
+- Persistence d'agression signée (range [-1, +1] : buys=+, sells=-)
 - Volatilité réalisée à 3s, 10s, 30s + ratio court/long
 - Toxicité instantanée (proxy), vitesse de refill, ratio cancel/add (fenêtre glissante 60s)
+- Feature maturity guard : `is_mature()` exige ≥5 trades + vol_30s > 0
 
 ## Régimes de marché
 
@@ -121,7 +122,7 @@ export GBOT__RISK__MAX_OPEN_POSITIONS=3
 | `coins` | Liste des coins tradés avec tick_size, lot_size, max_leverage, asset_index |
 | `features` | Fenêtres OFI, taille du tape, moyenne de spread |
 | `regime` | Seuils pour chaque régime (spread, volume, vol, toxicité) |
-| `strategy` | Poids du direction score, seuils pullback, queue desirability |
+| `strategy` | Poids du direction score, seuils pullback, queue desirability, SL/TP dynamique (volatility-based), confirmation directionnelle |
 | `risk` | Pertes max, positions max, drawdown throttle/circuit breaker, leverage |
 | `execution` | Durée max position, MAE max, break-even, trailing stop |
 | `recording` | Activation et intervalle de flush des données JSONL |
@@ -248,6 +249,7 @@ Voir `docs/deployment.md` pour le détail.
 | 5 | Backtest sur données enregistrées (`BacktestRunner`) | ✅ |
 | 6 | Dry-run simulation (fill sim, journal, signals) | ✅ |
 | 7 | UI de monitoring (dashboard SSE + métriques) | ✅ |
+| 7.1 | Post dry-run fixes: book sanitization, OFI/aggression/maturity, dynamic SL/TP, direction confirmation | ✅ |
 
 ## Données runtime (`data/`)
 
@@ -276,6 +278,10 @@ Voir `docs/deployment.md` pour le détail.
 13. **Cancel/add ratio** : suivi rolling 60s des deltas de book pour détection de spoofing
 14. **Reconnect avec backoff** : WebSocket reconnect exponentiel avec jitter
 15. **Kill-switch** : arrêt total des entrées si drawdown > seuil critique
+16. **Book sanitization** : `sanitize_crossed()` après chaque delta L2 empêche l'accumulation de niveaux croisés
+17. **SL/TP dynamique** : SL basé sur `2.5 × realized_vol_30s` (clampé 15-80 bps), pas un % fixe
+18. **Direction confirmation** : requiert N évaluations consécutives au-dessus du seuil avant signal (anti-bruit)
+19. **Feature maturity** : aucun signal émis si < 5 trades/10s ou vol_30s = 0 (données insuffisantes)
 
 ## Stack technique
 

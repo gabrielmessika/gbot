@@ -1414,7 +1414,7 @@ Rejouer session par session avec le moteur complet :
               BacktestRunner (replay JSONL → pipeline complet → BacktestSummary)
   Critère de sortie : expectancy nette > 0, maker_fill_rate > 40%
 
-  Phase 7.1 — Bug fixes post dry-run v1 (1-2 jours)
+  ✅ Phase 7.1 — Bug fixes post dry-run v1 (1-2 jours)
   Problèmes identifiés lors du dry-run du 2026-04-01 (WR=12%, 7/8 SL_HIT à -0.30%)
 
   a) Fix spread_bps négatif
@@ -1444,7 +1444,7 @@ Rejouer session par session avec le moteur complet :
   Critère de sortie : 0 signal avec spread_bps négatif, OFI distribué sur [-1,+1] avec variance,
                        vol_ratio > 0 pour tous les signaux émis
 
-  Phase 7.2 — SL/TP dynamique basé sur la volatilité (2-3 jours)
+  ✅ Phase 7.2 — SL/TP dynamique basé sur la volatilité (2-3 jours)
   Problème : SL fixé à 0.30% (pullback_retrace_pct) pour TOUS les coins, quelle que soit
   la volatilité. 0.30% = 30 bps ≈ bruit normal pour la plupart des coins. Résultat : 7/8
   trades fermés par SL immédiatement (dans les secondes qui suivent l'entrée).
@@ -1471,7 +1471,7 @@ Rejouer session par session avec le moteur complet :
   Critère de sortie : SL varie par coin selon volatilité réalisée, aucun signal avec SL < 20 bps,
                        backtest amélioré vs fixed SL
 
-  Phase 7.3 — Direction score : conviction et confirmation (2-3 jours)
+  ✅ Phase 7.3 — Direction score : conviction et confirmation (2-3 jours)
   Problème : les scores directionnels sont juste au-dessus du seuil (0.50-0.67), indiquant
   une conviction faible. La stratégie entre trop facilement.
 
@@ -1499,7 +1499,7 @@ Rejouer session par session avec le moteur complet :
 
   Critère de sortie : dir_score moyen des trades placés > 0.60, réduction de 30%+ des faux signaux
 
-  Phase 7.4 — Analyse offline des données collectées (3-5 jours, Python)
+  ✅ Phase 7.4 — Analyse offline des données collectées (3-5 jours, Python)
   ⚠ Phase critique — conditionne la calibration de 7.2 et 7.3.
   Utiliser les données accumulées (L2, trades, features, signaux) pour calibrer empiriquement.
 
@@ -1531,7 +1531,7 @@ Rejouer session par session avec le moteur complet :
 
   Livrables : notebook Python avec résultats, paramètres calibrés pour phases 7.2/7.3
 
-  Phase 7.5 — Entry timing : vrai pullback + flow confirmation (2-3 jours)
+  ✅ Phase 7.5 — Entry timing : vrai pullback + flow confirmation (2-3 jours)
   Problème : le bot entre dès que le direction_score franchit le seuil. La section 8.3 du plan
   décrit un mécanisme de "wait for pullback" mais l'implémentation actuelle ne vérifie pas
   de vrai retrace — elle entre immédiatement au best bid/ask.
@@ -1555,7 +1555,7 @@ Rejouer session par session avec le moteur complet :
   Critère de sortie : les entrées ne se font plus au premier tick, mais après un retrace confirmé.
                        Le taux de SL immédiat (< 30s) diminue de > 50%
 
-  Phase 7.6 — Backtest replay amélioré (2-3 jours)
+  ✅ Phase 7.6 — Backtest replay amélioré (2-3 jours)
   Le BacktestRunner actuel est simplifié (JSONL replay). Les données L2 collectées permettent
   un backtest beaucoup plus réaliste.
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use rust_decimal::Decimal;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use gbot::config::coins::CoinMetaStore;
 use gbot::config::settings::{BotMode, Settings};
@@ -29,7 +29,8 @@ use gbot::portfolio::state::PortfolioState;
 use gbot::regime::engine as regime_engine;
 use gbot::risk::manager::RiskManager;
 use gbot::strategy::mfdp::MfdpStrategy;
-use gbot::strategy::signal::Intent;
+use gbot::strategy::pullback::{PullbackSettings, PullbackTracker, UpdateResult};
+use gbot::strategy::signal::{Direction, Intent};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -211,6 +212,25 @@ async fn main() -> Result<()> {
     // ── Per-coin signal cooldown (prevents re-emitting same signal every tick) ──
     let mut signal_cooldowns: HashMap<String, i64> = HashMap::new();
     let signal_cooldown_ms: i64 = 30_000; // 30s cooldown per coin after signal
+
+    // ── Direction confirmation tracking ──
+    // Require min_direction_confirmations consecutive evaluations with score above threshold
+    // before emitting a signal. (last_sign: +1=Long, -1=Short, 0=neutral; consecutive_count)
+    let mut direction_confirms: HashMap<String, (i8, u32)> = HashMap::new();
+    let min_confirmations = settings.strategy.min_direction_confirmations;
+    let min_trades_for_signal = settings.strategy.min_trades_for_signal;
+
+    // ── Phase 7.5: Pullback tracker ──────────────────────────────────────────
+    // After direction confirmation, instead of placing the order immediately,
+    // we arm the pullback tracker. It waits for a micro-move then a retrace,
+    // and only then emits the entry signal.
+    let pullback_settings = PullbackSettings {
+        min_move_bps: settings.strategy.pullback_min_move_bps,
+        retrace_pct: settings.strategy.pullback_retrace_pct,
+        max_wait_ms: settings.strategy.max_wait_pullback_s as i64 * 1000,
+        ofi_confirm_threshold: settings.strategy.pullback_ofi_confirm,
+    };
+    let mut pullback_tracker = PullbackTracker::new();
 
     // ── Periodic summary tracking ──
     let summary_interval_ms: i64 = 300_000; // every 5 minutes
@@ -401,7 +421,113 @@ async fn main() -> Result<()> {
                                 .map(|&cd_until| now_ms < cd_until)
                                 .unwrap_or(false);
 
+                            // ── Pullback tracker update (Phase 7.5) ───────────────────────────
+                            // Runs while the coin is flat, even during the signal cooldown window
+                            // (the pullback was armed before cooldown was set). When the pullback
+                            // fires we place the entry; on abandon we set a short cooldown.
+                            if is_flat && position_mgr.get(coin).is_none()
+                                && regime.allows_entry()
+                                && pullback_tracker.is_pending(coin)
+                            {
+                                let ofi = features.flow.ofi_10s;
+                                match pullback_tracker.update(
+                                    coin,
+                                    current_mid,
+                                    ofi,
+                                    now_ms,
+                                    false, // opposite signal detection via reversal (>100% retrace)
+                                    &pullback_settings,
+                                ) {
+                                    UpdateResult::Ready(entry) => {
+                                        // Rebuild intent with updated entry price at pullback point
+                                        let ep = Decimal::try_from(entry.entry_mid).unwrap_or_default();
+                                        let sl_dist = Decimal::try_from(entry.entry_mid * entry.sl_pct).unwrap_or_default();
+                                        let tp_dist = Decimal::try_from(entry.entry_mid * entry.tp_pct).unwrap_or_default();
+                                        let (sl_price, tp_price) = match entry.direction {
+                                            Direction::Long => (ep - sl_dist, ep + tp_dist),
+                                            Direction::Short => (ep + sl_dist, ep - tp_dist),
+                                        };
+                                        let pullback_intent = Intent::PlacePassiveEntry {
+                                            coin: coin.clone(),
+                                            direction: entry.direction,
+                                            price: ep,
+                                            stop_loss: sl_price,
+                                            take_profit: tp_price,
+                                            size: entry.size,
+                                            max_wait_s: entry.max_wait_s,
+                                        };
+
+                                        // Set signal cooldown only when we actually place
+                                        signal_cooldowns.insert(coin.clone(), now_ms + signal_cooldown_ms);
+                                        signals_since_summary += 1;
+
+                                        match risk_mgr.validate_intent(
+                                            &pullback_intent,
+                                            current_equity,
+                                            &features,
+                                            &position_mgr,
+                                        ) {
+                                            Ok(()) => {
+                                                orders_since_summary += 1;
+                                                info!(
+                                                    "[PULLBACK] {} {:?} entry placed at {:.4} (sl={:.4} tp={:.4})",
+                                                    coin, entry.direction, entry.entry_mid, sl_price, tp_price
+                                                );
+                                                event_feed.push("order", format!("{} pullback entry", coin));
+                                                journal.log_event(&JournalEvent::OrderPlaced {
+                                                    ts_local: now_ms,
+                                                    coin: coin.clone(),
+                                                    direction: format!("{:?}", entry.direction),
+                                                    price: ep.to_string(),
+                                                    size: entry.size.to_string(),
+                                                    tif: "ALO".to_string(),
+                                                    client_oid: String::new(),
+                                                });
+                                                if let Err(e) = order_mgr
+                                                    .process_intent(pullback_intent, &rest, &meta_store)
+                                                    .await
+                                                {
+                                                    error!("[PULLBACK] Order error for {}: {}", coin, e);
+                                                    risk_mgr.record_error();
+                                                    error_count += 1;
+                                                    last_error = format!("Pullback order error {}: {}", coin, e);
+                                                    last_error_ts = now_ms;
+                                                }
+                                            }
+                                            Err(reasons) => {
+                                                rejections_since_summary += 1;
+                                                for r in &reasons {
+                                                    info!("[PULLBACK] Rejected {}: {}", coin, r);
+                                                }
+                                                journal.log_event(&JournalEvent::RiskRejection {
+                                                    ts_local: now_ms,
+                                                    coin: coin.clone(),
+                                                    reasons,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    UpdateResult::Abandoned(reason) => {
+                                        info!("[PULLBACK] {} setup abandoned: {:?}", coin, reason);
+                                        // Short cooldown to avoid immediately re-arming the same signal
+                                        signal_cooldowns.insert(coin.clone(), now_ms + 5_000);
+                                    }
+                                    _ => {} // Waiting or Idle — nothing to do
+                                }
+                                continue;
+                            }
+
                             if is_flat && position_mgr.get(coin).is_none() && regime.allows_entry() && !in_signal_cooldown {
+                                // Feature maturity guard: skip if insufficient data
+                                if !features.flow.is_mature() || features.flow.trade_count_10s < min_trades_for_signal {
+                                    continue;
+                                }
+
+                                // Book health guard: skip if spread is zero or negative
+                                if features.book.spread_bps <= 0.0 {
+                                    continue;
+                                }
+
                                 if let Some(book) = book_mgr.books.get(coin) {
                                     let (raw_intent, dir_score, queue_score) = match regime {
                                         regime_engine::Regime::QuietThin => {
@@ -445,11 +571,26 @@ async fn main() -> Result<()> {
                                     };
 
                                     if !matches!(sized_intent, Intent::NoTrade) {
-                                        // Set signal cooldown for this coin
-                                        signal_cooldowns.insert(coin.clone(), now_ms + signal_cooldown_ms);
-                                        signals_since_summary += 1;
+                                        // Direction confirmation: require consecutive evaluations
+                                        let dir_sign: i8 = if dir_score > 0.0 { 1 } else { -1 };
+                                        let (prev_sign, count) = direction_confirms.entry(coin.clone()).or_insert((0, 0));
+                                        if dir_sign == *prev_sign {
+                                            *count += 1;
+                                        } else {
+                                            *prev_sign = dir_sign;
+                                            *count = 1;
+                                        }
+                                        if *count < min_confirmations {
+                                            debug!(
+                                                "[MAIN] {} direction confirmation {}/{} — waiting",
+                                                coin, count, min_confirmations
+                                            );
+                                            continue;
+                                        }
+                                        // Reset counter after direction confirmed
+                                        *count = 0;
 
-                                        // Build signal record for persistence
+                                        // Record signal for observability (before pullback arm)
                                         let (sig_coin, sig_dir, sig_price, sig_sl, sig_tp) = if let Intent::PlacePassiveEntry {
                                             ref coin, direction, price, stop_loss, take_profit, ..
                                         } = sized_intent {
@@ -457,117 +598,60 @@ async fn main() -> Result<()> {
                                         } else {
                                             (coin.clone(), String::new(), String::new(), String::new(), String::new())
                                         };
+                                        signal_recorder.record(&SignalRecord {
+                                            ts: now_ms,
+                                            coin: sig_coin,
+                                            direction: sig_dir,
+                                            dir_score,
+                                            queue_score,
+                                            entry_price: sig_price,
+                                            stop_loss: sig_sl,
+                                            take_profit: sig_tp,
+                                            spread_bps: features.book.spread_bps,
+                                            imbalance_top5: features.book.imbalance_top5,
+                                            depth_ratio: features.book.depth_ratio,
+                                            micro_price_vs_mid_bps: features.book.micro_price_vs_mid_bps,
+                                            vamp_signal_bps: features.book.vamp_signal_bps,
+                                            bid_depth_10bps: features.book.bid_depth_10bps,
+                                            ask_depth_10bps: features.book.ask_depth_10bps,
+                                            ofi_10s: features.flow.ofi_10s,
+                                            toxicity: features.flow.toxicity_proxy_instant,
+                                            vol_ratio: features.flow.vol_ratio,
+                                            aggression: features.flow.aggression_persistence,
+                                            trade_intensity: features.flow.trade_intensity,
+                                            action: "pullback_armed".to_string(),
+                                            rejection_reason: None,
+                                        });
+                                        signals_since_summary += 1;
 
-                                        match risk_mgr.validate_intent(
-                                            &sized_intent,
-                                            current_equity,
-                                            &features,
-                                            &position_mgr,
-                                        ) {
-                                            Ok(()) => {
-                                                orders_since_summary += 1;
-                                                event_feed.push("order", format!(
-                                                    "{} entry placed", coin
-                                                ));
-
-                                                // Journal: order placed
-                                                if let Intent::PlacePassiveEntry {
-                                                    ref coin, direction, price, size, ..
-                                                } = sized_intent {
-                                                    journal.log_event(&JournalEvent::OrderPlaced {
-                                                        ts_local: now_ms,
-                                                        coin: coin.clone(),
-                                                        direction: format!("{:?}", direction),
-                                                        price: price.to_string(),
-                                                        size: size.to_string(),
-                                                        tif: "ALO".to_string(),
-                                                        client_oid: String::new(), // filled by order_mgr
-                                                    });
-                                                }
-
-                                                // Signal record: placed
-                                                signal_recorder.record(&SignalRecord {
-                                                    ts: now_ms,
-                                                    coin: sig_coin,
-                                                    direction: sig_dir,
-                                                    dir_score,
-                                                    queue_score,
-                                                    entry_price: sig_price,
-                                                    stop_loss: sig_sl,
-                                                    take_profit: sig_tp,
-                                                    spread_bps: features.book.spread_bps,
-                                                    imbalance_top5: features.book.imbalance_top5,
-                                                    depth_ratio: features.book.depth_ratio,
-                                                    micro_price_vs_mid_bps: features.book.micro_price_vs_mid_bps,
-                                                    vamp_signal_bps: features.book.vamp_signal_bps,
-                                                    bid_depth_10bps: features.book.bid_depth_10bps,
-                                                    ask_depth_10bps: features.book.ask_depth_10bps,
-                                                    ofi_10s: features.flow.ofi_10s,
-                                                    toxicity: features.flow.toxicity_proxy_instant,
-                                                    vol_ratio: features.flow.vol_ratio,
-                                                    aggression: features.flow.aggression_persistence,
-                                                    trade_intensity: features.flow.trade_intensity,
-                                                    action: "placed".to_string(),
-                                                    rejection_reason: None,
-                                                });
-
-                                                if let Err(e) = order_mgr
-                                                    .process_intent(sized_intent, &rest, &meta_store)
-                                                    .await
-                                                {
-                                                    error!("[MAIN] Order error for {}: {}", coin, e);
-                                                    risk_mgr.record_error();
-                                                    error_count += 1;
-                                                    last_error = format!("Order error {}: {}", coin, e);
-                                                    last_error_ts = now_ms;
-                                                    event_feed.push("risk", format!(
-                                                        "{} order error: {}", coin, e
-                                                    ));
-                                                }
-                                            }
-                                            Err(reasons) => {
-                                                rejections_since_summary += 1;
-                                                for r in &reasons {
-                                                    info!("[RISK] Rejected {}: {}", coin, r);
-                                                }
-
-                                                // Journal: risk rejection
-                                                journal.log_event(&JournalEvent::RiskRejection {
-                                                    ts_local: now_ms,
-                                                    coin: coin.clone(),
-                                                    reasons: reasons.clone(),
-                                                });
-
-                                                // Signal record: rejected
-                                                signal_recorder.record(&SignalRecord {
-                                                    ts: now_ms,
-                                                    coin: sig_coin,
-                                                    direction: sig_dir,
-                                                    dir_score,
-                                                    queue_score,
-                                                    entry_price: sig_price,
-                                                    stop_loss: sig_sl,
-                                                    take_profit: sig_tp,
-                                                    spread_bps: features.book.spread_bps,
-                                                    imbalance_top5: features.book.imbalance_top5,
-                                                    depth_ratio: features.book.depth_ratio,
-                                                    micro_price_vs_mid_bps: features.book.micro_price_vs_mid_bps,
-                                                    vamp_signal_bps: features.book.vamp_signal_bps,
-                                                    bid_depth_10bps: features.book.bid_depth_10bps,
-                                                    ask_depth_10bps: features.book.ask_depth_10bps,
-                                                    ofi_10s: features.flow.ofi_10s,
-                                                    toxicity: features.flow.toxicity_proxy_instant,
-                                                    vol_ratio: features.flow.vol_ratio,
-                                                    aggression: features.flow.aggression_persistence,
-                                                    trade_intensity: features.flow.trade_intensity,
-                                                    action: "risk_rejected".to_string(),
-                                                    rejection_reason: Some(reasons.join("; ")),
-                                                });
-
-                                                event_feed.push("risk", format!(
-                                                    "{} rejected: {}", coin, reasons.join(", ")
-                                                ));
-                                            }
+                                        // ── Phase 7.5: Arm pullback tracker ─────────────────
+                                        // Extract SL/TP as relative percentages, then hand off
+                                        // to the pullback tracker. Entry will be placed only
+                                        // after pullback + OFI confirmation.
+                                        if let Intent::PlacePassiveEntry {
+                                            direction, price, stop_loss, take_profit, size, max_wait_s, ..
+                                        } = sized_intent {
+                                            let p = f64::try_from(price).unwrap_or(current_mid);
+                                            let sl = f64::try_from(stop_loss).unwrap_or(p);
+                                            let tp = f64::try_from(take_profit).unwrap_or(p);
+                                            let sl_pct = if p > 0.0 { (p - sl).abs() / p } else { 0.0 };
+                                            let tp_pct = if p > 0.0 { (tp - p).abs() / p } else { 0.0 };
+                                            pullback_tracker.start(
+                                                coin,
+                                                direction,
+                                                current_mid,
+                                                sl_pct,
+                                                tp_pct,
+                                                size,
+                                                max_wait_s,
+                                                dir_score,
+                                                now_ms,
+                                                &pullback_settings,
+                                            );
+                                            debug!(
+                                                "[MAIN] {} pullback armed: mid={:.4} sl={:.4}% tp={:.4}%",
+                                                coin, current_mid, sl_pct * 100.0, tp_pct * 100.0
+                                            );
                                         }
                                     }
                                 }

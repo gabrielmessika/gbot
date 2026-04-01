@@ -1,5 +1,68 @@
 # Changelog
 
+## 2026-04-01 — Phases 7.4 / 7.5 / 7.6 implementation
+
+### Phase 7.4 — Analyse offline Python (`scripts/analyze_dry_run.py`)
+- Script autonome (pas de dépendances externes) qui charge les fichiers JSONL enregistrés
+- 7 sections : distribution features, corrélation Spearman feature×mid_move, adverse selection,
+  sensibilité SL/TP paramétrique, performance par coin, performance par heure UTC, recommandations
+- Usage : `python scripts/analyze_dry_run.py --data-dir ./data [--date 2026-04-01] [--output report.txt]`
+
+### Phase 7.5 — Entry timing pullback (`src/strategy/pullback.rs`)
+- State machine par coin : `WaitingMove` → `WaitingPullback` → `Ready | Abandoned`
+- Séquence : direction_score confirmé → micro-move ≥ min_move_bps → retrace ≥ retrace_pct → OFI confirme
+- Abandon : timeout (max_wait_pullback_s), renversement (retrace > 100%), signal opposé
+- Config : `pullback_min_move_bps=3.0`, `pullback_retrace_pct=0.35`, `pullback_ofi_confirm=0.0`
+- Entrée recalculée au mid du pullback (SL/TP en % hérités du signal initial)
+- Signal cooldown posé au moment de l'entrée effective (pas au moment du signal directionnel)
+
+### Phase 7.6 — Backtest amélioré (`src/backtest/runner.rs`, `replay_engine.rs`)
+- MAE/MFE tracker tick-by-tick : `mae_bps`, `mfe_bps` par trade (pire adversité / meilleur gain)
+- Adverse selection : `adverse_5s` — mid a-t-il bougé contre la direction dans les 5s post-entrée ?
+- Summary : `avg_mae_bps`, `avg_mfe_bps`, `mae_to_sl_ratio` (> 1.0 = SL trop serré vs bruit)
+- Mode comparaison : `run_comparison(fixed_sl_bps)` → `ComparisonResult { dynamic_sl, fixed_sl, deltas }`
+- Mode SL fixe : `SlMode::Fixed(bps)` override SL/TP pour rejouer avec SL constant
+- `initial_equity()` getter sur `ReplayEngine` pour les runs multiples
+
+## 2026-04-01 — Post dry-run v1: 6 critical fixes
+
+Analysis of the first dry-run session (53 signals, 12 trades, WR=25%, P&L=-$98) revealed 6 systematic issues. All fixed in this release.
+
+### 1. Book inversion fix (spread_bps negative — 96% of signals)
+- **Root cause**: L2 delta application could accumulate crossed levels (bid ≥ ask) over time. The book progressively corrupted: spread went from -1.4 bps at startup to -120 bps after 30min.
+- **Fix**: `OrderBook::apply_delta()` now calls `sanitize_crossed()` after every delta application. This removes bid levels ≥ best ask and ask levels ≤ best bid. `spread_bps()` returns `None` if ask ≤ bid. `BookManager` marks the book as stale if still crossed after sanitization.
+- **Guard**: `compute_book_features()` returns defaults for crossed books. Strategy skips coins with `spread_bps ≤ 0`.
+- **Files**: `book.rs`, `book_manager.rs`, `book_features.rs`, `mfdp.rs`
+
+### 2. OFI saturation fix (55% of values at ±1.0)
+- **Root cause**: `(buy_vol - sell_vol) / total` saturates to ±1 easily when a 10s window contains only 2-3 trades in the same direction (common in crypto).
+- **Fix**: Added confidence scaling — OFI magnitude is reduced when fewer than `MIN_OFI_TRADES` (5) trades exist in the window: `raw_ofi × min(trade_count/5, 1.0)`. This prevents a single trade from generating OFI=±1.0.
+- **File**: `flow_features.rs`
+
+### 3. Aggression persistence fix (always ≥ 0.5, never negative)
+- **Root cause**: Formula was `max(buys, sells) / total` — by definition, `max(a, b) ≥ ceil(total/2)`, so the minimum was always 0.5. The feature measured concentration, not directional persistence.
+- **Fix**: Changed to signed ratio: `(2 × buy_count - total) / total`. Range is now [-1, +1]: +1 = all buys, -1 = all sells, 0 = balanced. The direction_score formula in `mfdp.rs` no longer needs to infer sign from OFI.
+- **Files**: `flow_features.rs`, `mfdp.rs`
+
+### 4. Feature maturity guard (vol_ratio=0, trades=0)
+- **Root cause**: 42% of signals had `vol_ratio=0.0` because `realized_vol_30s` had no data yet. The bot traded on immature features.
+- **Fix**: Added `FlowFeatures::is_mature()` method requiring `trade_count_10s ≥ 5` AND `realized_vol_30s > 0`. Strategy and main loop skip evaluation when features are not mature.
+- **New field**: `trade_count_10s: usize` in `FlowFeatures`.
+- **New config**: `min_trades_for_signal = 5` (configurable).
+- **Files**: `flow_features.rs`, `mfdp.rs`, `main.rs`, `settings.rs`, `default.toml`
+
+### 5. Dynamic SL/TP based on realized volatility
+- **Root cause**: SL was fixed at 0.30% (`pullback_retrace_pct`) for ALL coins regardless of volatility. 0.30% = 30 bps ≈ normal noise for most coins. Result: 11/12 trades hit SL within seconds of entry.
+- **Fix**: SL distance is now `max(sl_min_bps, sl_vol_multiplier × realized_vol_30s)`, capped at `sl_max_bps`. TP = SL × `target_rr`. `pullback_retrace_pct` is kept for entry retrace detection only, no longer used for SL.
+- **Defaults**: `sl_vol_multiplier=2.5`, `sl_min_bps=15`, `sl_max_bps=80`, `target_rr=2.0`
+- **Files**: `mfdp.rs`, `settings.rs`, `default.toml`
+
+### 6. Direction score confirmation (avg |dir| was 0.549, threshold 0.50)
+- **Root cause**: Signals were barely above the 0.50 threshold (average 0.549). A single noisy tick crossing the threshold would trigger a trade.
+- **Fix**: Added confirmation counter per coin. The direction score must remain above threshold for `min_direction_confirmations` consecutive evaluations (default: 3) before a signal is emitted. Counter resets when direction changes.
+- **New config**: `min_direction_confirmations = 3`
+- **Files**: `main.rs`, `settings.rs`, `default.toml`
+
 ## 2026-04-01 — Bugfixes prix d'ordre & doctest
 
 ### Prix d'ordre incorrects pour DOGE, XRP, OP (bloquant)

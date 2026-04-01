@@ -59,6 +59,7 @@ impl SpreadAverage {
 }
 
 /// Compute instantaneous BookFeatures from a book snapshot.
+/// Returns default features if the book is empty or crossed.
 pub fn compute_book_features(book: &OrderBook, spread_avg: &mut SpreadAverage) -> BookFeatures {
     let mut features = BookFeatures::default();
 
@@ -67,9 +68,17 @@ pub fn compute_book_features(book: &OrderBook, spread_avg: &mut SpreadAverage) -
         None => return features,
     };
 
+    // Guard: skip computation if book is crossed (invalid state)
+    if book.is_crossed() {
+        return features;
+    }
+
     // ── Spread ──
     features.spread_bps = book.spread_bps().unwrap_or(0.0);
-    spread_avg.push(features.spread_bps);
+    // Don't feed negative spreads into the rolling average
+    if features.spread_bps > 0.0 {
+        spread_avg.push(features.spread_bps);
+    }
     let avg = spread_avg.average();
     features.spread_vs_avg = if avg > 0.0 {
         features.spread_bps / avg

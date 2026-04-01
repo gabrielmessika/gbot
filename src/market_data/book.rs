@@ -72,6 +72,7 @@ impl OrderBook {
     }
 
     /// Apply a delta update (insert/update/remove levels).
+    /// Sanitizes crossed levels after application.
     pub fn apply_delta(&mut self, bid_levels: &[BookLevel], ask_levels: &[BookLevel], ts: i64) {
         for level in bid_levels {
             let key = OrderedFloat(level.price);
@@ -89,6 +90,9 @@ impl OrderBook {
                 self.asks.insert(key, level.size);
             }
         }
+
+        // Sanitize any crossed levels to prevent progressive corruption
+        self.sanitize_crossed();
 
         self.last_update_ts = ts;
     }
@@ -121,10 +125,57 @@ impl OrderBook {
         }
     }
 
-    /// Spread in basis points.
+    /// Whether the book is crossed (best bid >= best ask).
+    /// A crossed book indicates corrupted state and must not be used for trading.
+    pub fn is_crossed(&self) -> bool {
+        match (self.best_bid(), self.best_ask()) {
+            (Some(bid), Some(ask)) => bid >= ask,
+            _ => false,
+        }
+    }
+
+    /// Remove levels that cross the spread (bid levels >= best ask, ask levels <= best bid).
+    /// Called after applying deltas to prevent progressive book corruption.
+    pub fn sanitize_crossed(&mut self) -> usize {
+        let mut removed = 0;
+
+        // Remove bid levels that are >= lowest ask
+        if let Some(best_ask) = self.asks.keys().next().map(|k| k.0) {
+            let ask_key = OrderedFloat(best_ask);
+            // Collect bid keys >= best_ask (these are invalid)
+            let bad_bids: Vec<OrderedFloat> = self
+                .bids
+                .range(ask_key..)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in &bad_bids {
+                self.bids.remove(k);
+            }
+            removed += bad_bids.len();
+        }
+
+        // Remove ask levels that are <= highest bid
+        if let Some(best_bid) = self.bids.keys().next_back().map(|k| k.0) {
+            let bid_key = OrderedFloat(best_bid);
+            // Collect ask keys <= best_bid (these are invalid)
+            let bad_asks: Vec<OrderedFloat> = self
+                .asks
+                .range(..=bid_key)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in &bad_asks {
+                self.asks.remove(k);
+            }
+            removed += bad_asks.len();
+        }
+
+        removed
+    }
+
+    /// Spread in basis points. Returns None if book is empty or crossed.
     pub fn spread_bps(&self) -> Option<f64> {
         match (self.best_bid(), self.best_ask()) {
-            (Some(bid), Some(ask)) if bid > 0.0 => {
+            (Some(bid), Some(ask)) if bid > 0.0 && ask > bid => {
                 let mid = (bid + ask) / 2.0;
                 Some((ask - bid) / mid * 10_000.0)
             }
