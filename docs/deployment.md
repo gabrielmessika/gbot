@@ -118,7 +118,7 @@ cat > /opt/gbot/.env << 'EOF'
 GBOT__EXCHANGE__WALLET_ADDRESS=0xYOUR_WALLET
 GBOT__EXCHANGE__AGENT_PRIVATE_KEY=YOUR_PRIVATE_KEY
 GBOT__GENERAL__MODE=observation
-RUST_LOG=info
+RUST_LOG=debug
 EOF
 chmod 600 /opt/gbot/.env
 ```

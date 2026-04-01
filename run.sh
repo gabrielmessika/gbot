@@ -78,7 +78,7 @@ mkdir -p data/{l2,trades,features,signals,orders,fills,pnl,journal,logs}
 
 # ---- Lancement ----
 export GBOT__GENERAL__MODE="$MODE"
-export RUST_LOG="${RUST_LOG:-info}"
+export RUST_LOG="${RUST_LOG:-debug}"
 
 echo ""
 echo "========================================="

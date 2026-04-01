@@ -315,16 +315,21 @@ function renderEvents(events) {
         return;
     }
 
+    // Auto-scroll: only scroll to bottom if user is already near the bottom
+    const wasAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 30;
+
     let html = '';
-    for (let i = events.length - 1; i >= 0; i--) {
-        const ev = events[i];
+    for (const ev of events) {
         const time = fmtTime(ev.ts);
         const cls = 'event-' + (ev.event_type || 'system');
         html += `<div class="event-line"><span class="event-ts">[${time}]</span><span class="${cls}">${escapeHtml(ev.message)}</span></div>`;
     }
 
     container.innerHTML = html;
-    container.scrollTop = 0;
+
+    if (wasAtBottom) {
+        container.scrollTop = container.scrollHeight;
+    }
 }
 
 // ── Helpers ──

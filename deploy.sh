@@ -119,7 +119,7 @@ check_env() {
         echo "    GBOT__EXCHANGE__WALLET_ADDRESS=0xYOUR_WALLET"
         echo "    GBOT__EXCHANGE__AGENT_PRIVATE_KEY=YOUR_KEY"
         echo "    GBOT__GENERAL__MODE=observation"
-        echo "    RUST_LOG=info"
+        echo "    RUST_LOG=debug"
         echo "    EOF"
         echo "    chmod 600 ${DEPLOY_DIR}/.env"
         echo ""
