@@ -8,6 +8,7 @@ target
 
 # Runtime data
 data/
+server-data/
 *.jsonl
 *.parquet
 
