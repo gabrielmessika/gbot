@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tracing::debug;
 
 use crate::features::book_features::{self, BookFeatures, SpreadAverage};
 use crate::features::flow_features::{self, FlowFeatures};
@@ -20,7 +18,6 @@ pub struct CoinFeatures {
 pub struct FeatureEngine {
     pub features: DashMap<String, CoinFeatures>,
     spread_averages: DashMap<String, SpreadAverage>,
-    coins: Vec<String>,
 }
 
 impl FeatureEngine {
@@ -28,7 +25,6 @@ impl FeatureEngine {
         let engine = Arc::new(Self {
             features: DashMap::new(),
             spread_averages: DashMap::new(),
-            coins: coins.to_vec(),
         });
 
         for coin in coins {

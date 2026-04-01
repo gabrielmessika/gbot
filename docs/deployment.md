@@ -19,6 +19,32 @@
 
 ---
 
+## 0. Configuration SSH (une seule fois)
+
+Avant tout déploiement, configurer l'accès SSH au serveur Hetzner :
+
+```bash
+# 1. Générer une clé dédiée (si pas déjà fait)
+ssh-keygen -t ed25519 -C "gbot" -f ~/.ssh/gbot
+
+# 2. Copier la clé sur le serveur (mot de passe root demandé une seule fois)
+ssh-copy-id -i ~/.ssh/gbot.pub root@46.224.43.198
+
+# 3. Ajouter l'alias SSH dans ~/.ssh/config
+cat >> ~/.ssh/config << 'EOF'
+
+Host gbot
+    HostName 46.224.43.198
+    User root
+    IdentityFile ~/.ssh/gbot
+EOF
+
+# 4. Tester
+ssh gbot echo "ok"
+```
+
+---
+
 ## 1. Déploiement local
 
 ### Cargo (développement)
@@ -67,72 +93,62 @@ L'UI est **read-only**, sans authentification — ne pas exposer publiquement sa
 
 ## 2. Déploiement sur le serveur Hetzner (`gbot`)
 
-### 2.1. Connexion SSH
+### 2.1. Préparer le serveur (une seule fois)
+
+Le script `prepareServer.sh` installe Docker, fail2ban, ufw, crée l'utilisateur `gbot-deploy`, et prépare `/opt/gbot` :
+
+```bash
+./prepareServer.sh 46.224.43.198
+```
+
+Ce qu'il fait :
+- Installe Docker, fail2ban, ufw
+- Configure le firewall (SSH uniquement — port 3000 **non** exposé)
+- Crée l'utilisateur `gbot-deploy` avec accès Docker
+- Prépare `/opt/gbot/data`
+- Sécurise SSH (clé uniquement, pas de mot de passe)
+- Augmente les limites de fichiers ouverts (WebSocket + Parquet)
+- Active les mises à jour de sécurité automatiques
+
+### 2.2. Configurer les secrets (une seule fois)
 
 ```bash
 ssh gbot
-# ou explicitement :
-ssh root@<IP_HETZNER>
-```
-
-### 2.2. Première installation
-
-```bash
-# Sur le serveur gbot
-mkdir -p /opt/gbot && cd /opt/gbot
-
-# Cloner le repo (ou scp depuis local)
-git clone <repo_url> .
-# ou depuis local :
-# scp -r ./ gbot:/opt/gbot/
-
-# Builder Docker
-docker build -t gbot .
-
-# Créer le fichier .env avec les secrets
 cat > /opt/gbot/.env << 'EOF'
 GBOT__EXCHANGE__WALLET_ADDRESS=0xYOUR_WALLET
 GBOT__EXCHANGE__AGENT_PRIVATE_KEY=YOUR_PRIVATE_KEY
-GBOT__GENERAL__MODE=live
+GBOT__GENERAL__MODE=observation
 RUST_LOG=info
 EOF
 chmod 600 /opt/gbot/.env
 ```
 
-### 2.3. Lancer le bot
+### 2.3. Déployer et lancer avec `deploy.sh`
 
 ```bash
-cd /opt/gbot
+# Déployer le code + build Docker (sans démarrer)
+./deploy.sh
 
-docker run -d \
-  --name gbot \
-  --restart unless-stopped \
-  -p 127.0.0.1:3000:3000 \
-  -v /opt/gbot/data:/app/data \
-  --env-file /opt/gbot/.env \
-  gbot
+# Déployer + (re)démarrer le bot
+./deploy.sh --start
 ```
 
-> **Note** : le port est bindé sur `127.0.0.1` seulement — l'UI n'est pas exposée publiquement.
+Le script :
+1. Vérifie les prérequis locaux (Cargo.toml, Dockerfile, static/, connexion SSH)
+2. `rsync` le code vers `/opt/gbot` (exclut .git, target, data, .env, research, *.parquet)
+3. Build l'image Docker sur le serveur
+4. Vérifie la présence du `.env`
+5. Avec `--start` : arrête l'ancien container s'il tourne, lance le nouveau, health check
 
 ### 2.4. Mettre à jour le bot
 
-```bash
-ssh gbot
-cd /opt/gbot
-git pull
-docker build -t gbot .
-docker stop gbot && docker rm gbot
+Même commande que le déploiement initial :
 
-# Relancer (même commande que 2.3)
-docker run -d \
-  --name gbot \
-  --restart unless-stopped \
-  -p 127.0.0.1:3000:3000 \
-  -v /opt/gbot/data:/app/data \
-  --env-file /opt/gbot/.env \
-  gbot
+```bash
+./deploy.sh --start
 ```
+
+Le script arrête automatiquement l'ancien container, rebuild l'image et relance.
 
 ### 2.5. Accéder à l'UI depuis ta machine locale
 
@@ -185,7 +201,45 @@ curl http://localhost:3000/api/state | python3 -m json.tool
 ### Arrêt d'urgence
 
 ```bash
-docker stop gbot
+ssh gbot 'docker stop gbot'
+```
+
+### Déploiement rapide
+
+```bash
+# Depuis ta machine locale — tout en une commande
+./deploy.sh --start
+```
+
+### Récupérer les données pour analyse locale
+
+Le script `fetch-data.sh` télécharge les données du serveur dans `./server-data/` :
+
+```bash
+# Dernières 24h (défaut)
+./fetch-data.sh
+
+# 3 derniers jours
+./fetch-data.sh --days 3
+
+# Date précise
+./fetch-data.sh --date 2026-04-01
+
+# Tout
+./fetch-data.sh --all
+
+# Uniquement les logs Docker
+./fetch-data.sh --logs-only
+
+# Voir ce qui serait téléchargé sans rien faire
+./fetch-data.sh --dry-run
+```
+
+Le script récupère : l2, trades, features, signaux, ordres, fills, P&L, journal, logs Docker, et un snapshot de l'API `/api/state`.
+
+Analyse ensuite avec DuckDB ou Python/Polars :
+```bash
+duckdb -c "SELECT * FROM 'server-data/fills/*.parquet' LIMIT 20"
 ```
 
 ### Données

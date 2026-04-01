@@ -185,6 +185,22 @@ Stack : HTML + JS vanilla + CSS custom (dark theme). Pas de dépendance externe,
 
 Accès : `http://localhost:3000` (local) ou via tunnel SSH (`ssh -L 3000:127.0.0.1:3000 gbot`). Voir `docs/deployment.md`.
 
+### Déploiement serveur (Hetzner)
+
+```bash
+# Préparer le serveur (une seule fois)
+./prepareServer.sh 46.224.43.198
+
+# Déployer et démarrer
+./deploy.sh --start
+
+# Accéder à l'UI via tunnel SSH
+ssh -L 3000:127.0.0.1:3000 gbot
+# → http://localhost:3000
+```
+
+Voir `docs/deployment.md` pour le détail.
+
 ## Gestion du risque
 
 ### Par trade

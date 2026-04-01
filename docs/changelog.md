@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-04-01 — fetch-data.sh
+
+- **fetch-data.sh**: Script de récupération des données du serveur (rsync). Filtrage par date/jours, mode --logs-only, --dry-run. Récupère aussi un snapshot de l'API et les logs Docker.
+
+## 2026-04-01 — Dashboard UI + Deployment Scripts
+
+- **Dashboard UI** (`static/`): Single page HTML/JS/CSS (dark theme), SSE temps réel (500ms), 5 zones (header, books, positions, métriques, event feed)
+- **Backend SSE** (`dashboard.rs`): `DashboardSnapshot` via `Arc<RwLock<>>`, `EventFeed` (rolling 30 events), routes `/api/state` + `/api/stream`, `ServeDir` pour fichiers statiques
+- **Main loop**: dashboard tick toutes les 500ms dans le `select!`, tracking des régimes par coin, event push (fills, régime changes, reconnects, risk rejections)
+- **deploy.sh**: rsync + docker build + auto (re)start avec `--start`, health check
+- **prepareServer.sh**: Docker, fail2ban, ufw, utilisateur gbot-deploy, limites nofile, sécurisation SSH
+- **Cargo.toml**: ajout `tower-http` feature `fs`, `tokio-stream`
+- **Dockerfile**: copie `static/` dans l'image
+
 ## 2026-04-01 — Initial Implementation
 
 - Full project scaffold based on plan3.md (MFDP V1)

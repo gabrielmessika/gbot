@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::market_data::book::OrderBook;
 use crate::market_data::book_manager::TapeEntry;

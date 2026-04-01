@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use serde_json::Value;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::exchange::ws_client::{TradePrintData, WsEvent};
 use crate::market_data::book::{BookLevel, OrderBook};

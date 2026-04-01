@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tracing::info;
 
-use crate::backtest::sim_book::SimBook;
 use crate::backtest::sim_execution::FeeModel;
 
 /// A single backtest trade result.
@@ -45,6 +43,7 @@ pub struct BacktestSummary {
 /// Replay engine for tick-by-tick backtesting.
 /// Phase 1: placeholder structure. Full implementation requires recorded data.
 pub struct ReplayEngine {
+    #[allow(dead_code)]
     fee_model: FeeModel,
     trades: Vec<BacktestTrade>,
     equity: f64,

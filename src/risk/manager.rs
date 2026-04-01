@@ -1,11 +1,10 @@
 use rust_decimal::Decimal;
 use tracing::{info, warn};
 
-use crate::config::coins::CoinMetaStore;
 use crate::config::settings::RiskSettings;
 use crate::execution::position_manager::PositionManager;
 use crate::features::engine::CoinFeatures;
-use crate::strategy::signal::{Direction, Intent};
+use crate::strategy::signal::Intent;
 
 /// Risk manager — has absolute veto power over the strategy.
 pub struct RiskManager {

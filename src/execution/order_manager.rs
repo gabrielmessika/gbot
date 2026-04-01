@@ -103,6 +103,7 @@ pub struct OrderManager {
     sequence: u64,
     session_date: String,
     mode: BotMode,
+    #[allow(dead_code)]
     settings: ExecutionSettings,
 }
 
@@ -538,7 +539,7 @@ impl OrderManager {
 
 /// Adjust SL/TP proportionally if actual fill deviated > 0.5% from intended price (t-bot bug #2).
 fn adjust_levels_for_fill(
-    direction: Direction,
+    _direction: Direction,
     intended_price: Decimal,
     fill_price: Decimal,
     stop_loss: Decimal,

@@ -4,7 +4,6 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::execution::position_manager::OpenPosition;
-use crate::strategy::signal::Direction;
 
 /// Internal truth of the portfolio state. Reconciled periodically with the exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]

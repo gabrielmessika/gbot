@@ -63,7 +63,8 @@ async fn main() -> Result<()> {
                 "[MAIN] Signer init failed (no private key?): {}. Running in observation mode.",
                 e
             );
-            HyperliquidSigner::new(&"0".repeat(64), String::new()).expect("dummy signer")
+            // All-zero key is invalid for secp256k1; use scalar=1 as dummy
+            HyperliquidSigner::new(&format!("{:0>63}1", ""), String::new()).expect("dummy signer")
         }),
     );
 

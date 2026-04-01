@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use chrono::Utc;
 use serde::Serialize;
-use tracing::{error, info};
+use tracing::info;
 
 /// JSONL journal for orders and events (debug/audit fallback).
 pub struct Journal {

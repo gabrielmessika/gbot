@@ -1,5 +1,5 @@
 use prometheus::{
-    self, Gauge, GaugeVec, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
+    self, Gauge, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
 };
 
 /// Prometheus metrics for observability.

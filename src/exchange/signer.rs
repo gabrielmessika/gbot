@@ -1,8 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use k256::ecdsa::{SigningKey, Signature, signature::Signer};
 use serde_json::{json, Value};
 use sha3::{Digest, Keccak256};
-use tracing::debug;
 
 /// EIP-712 signer for Hyperliquid exchange actions.
 /// Port of HyperliquidSigner from t-bot (Java).
@@ -14,6 +13,12 @@ pub struct HyperliquidSigner {
 impl HyperliquidSigner {
     pub fn new(private_key_hex: &str, wallet_address: String) -> Result<Self> {
         let key_bytes = hex::decode(private_key_hex.trim_start_matches("0x"))?;
+        if key_bytes.len() != 32 {
+            return Err(anyhow::anyhow!(
+                "Invalid private key length: expected 32 bytes, got {}",
+                key_bytes.len()
+            ));
+        }
         let signing_key = SigningKey::from_bytes((&key_bytes[..]).into())
             .map_err(|e| anyhow::anyhow!("Invalid private key: {}", e))?;
         Ok(Self {
@@ -38,16 +43,6 @@ impl HyperliquidSigner {
 
         let signature: Signature = self.signing_key.sign(&connection_id);
         let sig_bytes = signature.to_bytes();
-
-        // k256 produces (r, s) — we need to append recovery id (v = 27 or 28)
-        // For EIP-712, we use v=27 as default (chainId-aware schemes differ)
-        let mut sig_with_v = Vec::with_capacity(65);
-        sig_with_v.extend_from_slice(&sig_bytes);
-        sig_with_v.push(27);
-
-        let sig_hex = format!("0x{}", hex::encode(&sig_with_v));
-
-        debug!("[SIGNER] Signed action, sig length: {}", sig_with_v.len());
 
         Ok(json!({
             "r": format!("0x{}", hex::encode(&sig_bytes[..32])),

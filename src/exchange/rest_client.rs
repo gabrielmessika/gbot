@@ -1,13 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
-use tracing::{debug, error, info, warn};
+use tracing::error;
 
-use crate::config::coins::CoinMetaStore;
 use crate::config::settings::ExchangeSettings;
 use crate::exchange::rate_limiter::RateLimiter;
 use crate::exchange::signer::HyperliquidSigner;
@@ -208,7 +207,7 @@ impl RestClient {
     }
 
     /// Cancel an order by OID.
-    pub async fn cancel_order(&self, coin: &str, oid: &str, asset_index: u32) -> Result<OrderResult> {
+    pub async fn cancel_order(&self, _coin: &str, oid: &str, asset_index: u32) -> Result<OrderResult> {
         self.rate_limiter.acquire_order().await?;
 
         let action = json!({
