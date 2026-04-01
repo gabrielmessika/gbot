@@ -14,6 +14,7 @@
         <div class="header-left">
             <span class="logo">gbot</span>
             <span id="live-dot" class="dot dot-grey" title="Connecting..."></span>
+            <span id="header-mode" class="mode-badge">—</span>
         </div>
         <div class="header-metrics">
             <div class="header-metric">
@@ -32,64 +33,158 @@
                 <span class="label">Positions</span>
                 <span id="pos-count" class="value">0</span>
             </div>
+            <div class="header-metric">
+                <span class="label">Uptime</span>
+                <span id="uptime" class="value">—</span>
+            </div>
         </div>
     </header>
 
-    <!-- MAIN GRID: 2 columns -->
-    <main class="grid-main">
-        <!-- LEFT: Order Books -->
-        <section class="panel" id="panel-books">
-            <h2>Carnet en temps réel</h2>
-            <div id="books-container">
-                <div class="empty-state">En attente de données...</div>
-            </div>
-        </section>
+    <!-- TAB NAV -->
+    <nav class="tab-nav">
+        <button class="tab-btn active" data-tab="tab-status">Status</button>
+        <button class="tab-btn" data-tab="tab-positions">Positions</button>
+        <button class="tab-btn" data-tab="tab-books">Books</button>
+        <button class="tab-btn" data-tab="tab-events">Events</button>
+    </nav>
 
-        <!-- RIGHT: Positions + Pending -->
-        <section class="panel" id="panel-positions">
-            <h2>Positions & Ordres</h2>
-            <div id="positions-container">
-                <div class="empty-state">Aucune position</div>
+    <!-- TAB: STATUS (default) -->
+    <section class="tab-content active" id="tab-status">
+        <!-- Health cards -->
+        <div class="status-grid">
+            <div class="status-card" id="card-health">
+                <div class="status-card-header">
+                    <span class="status-icon" id="health-icon">●</span>
+                    <span class="status-title">Santé du bot</span>
+                </div>
+                <div class="status-card-body">
+                    <div class="status-row"><span class="label">Mode</span><span id="st-mode" class="value">—</span>
+                    </div>
+                    <div class="status-row"><span class="label">Démarré</span><span id="st-started"
+                            class="value">—</span></div>
+                    <div class="status-row"><span class="label">Uptime</span><span id="st-uptime" class="value">—</span>
+                    </div>
+                    <div class="status-row"><span class="label">Coins actifs</span><span id="st-coins"
+                            class="value">—</span></div>
+                    <div class="status-row"><span class="label">Errors</span><span id="st-errors" class="value">0</span>
+                    </div>
+                    <div class="status-row"><span class="label">Warnings</span><span id="st-warns"
+                            class="value">0</span></div>
+                    <div class="status-row" id="st-last-error-row" style="display:none">
+                        <span class="label">Dernière erreur</span>
+                        <span id="st-last-error" class="value color-red"
+                            style="font-size:11px;max-width:300px;text-align:right;">—</span>
+                    </div>
+                </div>
             </div>
-        </section>
-    </main>
 
-    <!-- METRICS BAR -->
-    <section class="panel metrics-bar" id="panel-metrics">
-        <h2>Métriques Session</h2>
-        <div id="metrics-grid" class="metrics-grid">
-            <div class="metric-item">
-                <span class="label">Fill rate</span>
-                <span id="m-fill-rate" class="value">—</span>
+            <div class="status-card">
+                <div class="status-card-header">
+                    <span class="status-title">Performance Session</span>
+                </div>
+                <div class="status-card-body">
+                    <div class="status-row"><span class="label">Trades</span><span id="st-total-trades"
+                            class="value">0</span></div>
+                    <div class="status-row"><span class="label">Win / Loss</span><span id="st-winloss" class="value">0 /
+                            0</span></div>
+                    <div class="status-row"><span class="label">Win rate</span><span id="st-winrate"
+                            class="value">—</span></div>
+                    <div class="status-row"><span class="label">P&L total</span><span id="st-total-pnl"
+                            class="value">—</span></div>
+                </div>
             </div>
-            <div class="metric-item">
-                <span class="label">Adv. sel.</span>
-                <span id="m-adverse" class="value">—</span>
+        </div>
+
+        <!-- Period breakdown -->
+        <div class="panel">
+            <h2>Performance par période</h2>
+            <table class="period-table" id="period-table">
+                <thead>
+                    <tr>
+                        <th>Période</th>
+                        <th>Trades</th>
+                        <th>Win Rate</th>
+                        <th>P&L</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>1 heure</td>
+                        <td id="p-1h-trades">0</td>
+                        <td id="p-1h-wr">—</td>
+                        <td id="p-1h-pnl">—</td>
+                    </tr>
+                    <tr>
+                        <td>24 heures</td>
+                        <td id="p-24h-trades">0</td>
+                        <td id="p-24h-wr">—</td>
+                        <td id="p-24h-pnl">—</td>
+                    </tr>
+                    <tr>
+                        <td>7 jours</td>
+                        <td id="p-7d-trades">0</td>
+                        <td id="p-7d-wr">—</td>
+                        <td id="p-7d-pnl">—</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Closed trades -->
+        <div class="panel">
+            <h2>Historique des trades</h2>
+            <div id="closed-trades-container">
+                <div class="empty-state">Aucun trade fermé</div>
             </div>
-            <div class="metric-item">
-                <span class="label">Spread cap.</span>
-                <span id="m-spread-cap" class="value">—</span>
-            </div>
-            <div class="metric-item">
-                <span class="label">Queue lag p95</span>
-                <span id="m-lag" class="value">—</span>
-            </div>
-            <div class="metric-item">
-                <span class="label">WS reconnects</span>
-                <span id="m-reconnects" class="value">0</span>
-            </div>
-            <div class="metric-item">
-                <span class="label">Kill-switch</span>
-                <span id="m-killswitch" class="value">0</span>
+        </div>
+
+        <!-- Metrics -->
+        <div class="panel">
+            <h2>Métriques Session</h2>
+            <div class="metrics-grid">
+                <div class="metric-item"><span class="label">Fill rate</span><span id="m-fill-rate"
+                        class="value">—</span></div>
+                <div class="metric-item"><span class="label">Adv. sel.</span><span id="m-adverse" class="value">—</span>
+                </div>
+                <div class="metric-item"><span class="label">Spread cap.</span><span id="m-spread-cap"
+                        class="value">—</span></div>
+                <div class="metric-item"><span class="label">Queue lag p95</span><span id="m-lag" class="value">—</span>
+                </div>
+                <div class="metric-item"><span class="label">WS reconnects</span><span id="m-reconnects"
+                        class="value">0</span></div>
+                <div class="metric-item"><span class="label">Kill-switch</span><span id="m-killswitch"
+                        class="value">0</span></div>
             </div>
         </div>
     </section>
 
-    <!-- EVENT FEED -->
-    <section class="panel" id="panel-events">
-        <h2>Feed d'événements</h2>
-        <div id="events-container" class="events-feed">
-            <div class="empty-state">En attente d'événements...</div>
+    <!-- TAB: POSITIONS -->
+    <section class="tab-content" id="tab-positions">
+        <div class="panel">
+            <h2>Positions ouvertes & Ordres en attente</h2>
+            <div id="positions-container">
+                <div class="empty-state">Aucune position</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- TAB: BOOKS -->
+    <section class="tab-content" id="tab-books">
+        <div class="panel">
+            <h2>Carnet en temps réel</h2>
+            <div id="books-container">
+                <div class="empty-state">En attente de données...</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- TAB: EVENTS -->
+    <section class="tab-content" id="tab-events">
+        <div class="panel">
+            <h2>Feed d'événements</h2>
+            <div id="events-container" class="events-feed">
+                <div class="empty-state">En attente d'événements...</div>
+            </div>
         </div>
     </section>
 

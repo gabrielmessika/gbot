@@ -1,7 +1,8 @@
 [general]
-mode = "observation"  # "observation" | "dry-run" | "live"
-log_level = "info"
+mode = "dry-run"  # "observation" | "dry-run" | "live"
+log_level = "debug"
 data_dir = "./data"
+simulated_equity = 10000.0  # Starting equity for dry-run ($)
 
 [exchange]
 ws_url = "wss://api.hyperliquid.xyz/ws"
@@ -29,7 +30,16 @@ max_delay_ms = 30000
 backoff_factor = 2.0
 
 [coins]
-active = ["BTC", "SOL", "ETH"]
+active = [
+  # Tier 1 — très haute liquidité, spreads ultra-serrés
+  "BTC", "ETH", "SOL",
+  # Tier 2 — bonne liquidité, microstructure saine
+  "AVAX", "LINK", "NEAR", "ARB", "OP",
+  # Tier 3 — volume élevé, spreads parfois plus larges
+  "DOGE", "XRP", "SUI",
+  # Hyperliquid natif — très actif sur la plateforme
+  "HYPE",
+]
 
 [features]
 # Ring buffer sizes

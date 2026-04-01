@@ -1,5 +1,3 @@
-use serde::Serialize;
-
 use crate::market_data::book::{BookLevel, OrderBook};
 
 /// Simulated order book for backtesting.

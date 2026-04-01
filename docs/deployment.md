@@ -12,8 +12,8 @@
 |----------|-------------|----------|
 | `GBOT__EXCHANGE__WALLET_ADDRESS` | Hyperliquid wallet address | Yes (live) |
 | `GBOT__EXCHANGE__AGENT_PRIVATE_KEY` | Agent wallet private key (hex) | Yes (live) |
-| `GBOT__GENERAL__MODE` | `observation`, `dry-run`, or `live` | No (default: observation) |
-| `RUST_LOG` | Log level (`info`, `debug`, `warn`) | No (default: info) |
+| `GBOT__GENERAL__MODE` | `observation`, `dry-run`, or `live` | No (default: dry-run) |
+| `RUST_LOG` | Log level (`info`, `debug`, `warn`) | No (default: debug) |
 
 > **Secrets** : ne jamais commiter de clé privée. Utiliser des variables d'environnement ou un fichier `.env` (ajouté dans `.gitignore`).
 
@@ -71,7 +71,7 @@ docker run -d \
   --name gbot \
   -p 3000:3000 \
   -v $(pwd)/data:/app/data \
-  -e GBOT__GENERAL__MODE=observation \
+  -e GBOT__GENERAL__MODE=dry-run \
   gbot
 ```
 

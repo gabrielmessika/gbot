@@ -36,6 +36,8 @@ pub struct DashboardSnapshot {
     pub books: HashMap<String, BookView>,
     pub metrics: MetricsView,
     pub events: Vec<EventEntry>,
+    pub closed_trades: Vec<ClosedTradeView>,
+    pub bot_status: BotStatusView,
 }
 
 /// Serializable position for the UI.
@@ -84,6 +86,55 @@ pub struct MetricsView {
     pub ws_reconnects_today: u64,
     pub queue_lag_ms_p95: f64,
     pub kill_switch_count: u64,
+}
+
+/// A closed trade for the history view.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClosedTradeView {
+    pub coin: String,
+    pub direction: String,
+    pub entry_price: f64,
+    pub exit_price: f64,
+    pub pnl_usd: f64,
+    pub pnl_pct: f64,
+    pub close_reason: String,
+    pub opened_at: i64,
+    pub closed_at: i64,
+    pub hold_s: i64,
+    pub break_even_applied: bool,
+}
+
+/// Bot health and session status.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct BotStatusView {
+    pub mode: String,
+    pub started_at: i64,
+    pub uptime_s: i64,
+    pub active_coins: Vec<String>,
+    /// Number of errors since startup (equity fetch fails, order errors, etc.)
+    pub error_count: u64,
+    /// Number of warnings since startup
+    pub warn_count: u64,
+    /// Last error message if any
+    pub last_error: String,
+    /// Last error timestamp
+    pub last_error_ts: i64,
+    /// Totals
+    pub total_trades: u32,
+    pub total_wins: u32,
+    pub total_losses: u32,
+    pub total_pnl_usd: f64,
+    pub win_rate_pct: f64,
+    // Period breakdowns: 1h, 24h, 7d
+    pub pnl_1h: f64,
+    pub pnl_24h: f64,
+    pub pnl_7d: f64,
+    pub trades_1h: u32,
+    pub trades_24h: u32,
+    pub trades_7d: u32,
+    pub win_rate_1h: f64,
+    pub win_rate_24h: f64,
+    pub win_rate_7d: f64,
 }
 
 /// A single event in the rolling feed.

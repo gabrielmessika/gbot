@@ -62,6 +62,31 @@ header {
     letter-spacing: 1px;
 }
 
+.mode-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+    background: #2a2a2a;
+    color: var(--text-muted);
+}
+
+.mode-badge.mode-dryrun {
+    background: #3a3520;
+    color: var(--yellow);
+}
+
+.mode-badge.mode-live {
+    background: #1a3a1a;
+    color: var(--green);
+}
+
+.mode-badge.mode-observation {
+    background: #152238;
+    color: var(--accent);
+}
+
 .dot {
     width: 10px;
     height: 10px;
@@ -118,6 +143,179 @@ header {
     font-family: var(--font-mono);
     font-size: 16px;
     font-weight: 600;
+}
+
+/* ── TAB NAVIGATION ── */
+
+.tab-nav {
+    display: flex;
+    gap: 0;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    padding: 0 16px;
+    position: sticky;
+    top: 54px;
+    z-index: 99;
+}
+
+.tab-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px 18px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.2s, border-color 0.2s;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.tab-btn:hover {
+    color: var(--text);
+}
+
+.tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+
+.tab-content {
+    display: none;
+    padding: 16px;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+/* ── STATUS CARDS ── */
+
+.status-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.status-card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+}
+
+.status-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.status-icon {
+    font-size: 16px;
+}
+
+.status-title {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+}
+
+.status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+}
+
+.status-row .label {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.status-row .value {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 500;
+}
+
+/* ── PERIOD TABLE ── */
+
+.period-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.period-table th {
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.period-table td {
+    padding: 8px 12px;
+    font-family: var(--font-mono);
+    border-bottom: 1px solid var(--border);
+}
+
+/* ── TRADES TABLE ── */
+
+.trades-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.trades-table th {
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-align: left;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg-panel);
+}
+
+.trades-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+}
+
+.trades-table tbody tr:hover {
+    background: rgba(88, 166, 255, 0.05);
+}
+
+.trades-table .mono {
+    font-family: var(--font-mono);
+}
+
+.trades-table .reason {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.direction-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 3px;
 }
 
 /* ── MAIN GRID ── */
@@ -550,6 +748,10 @@ header {
 
 @media (max-width: 900px) {
     .grid-main {
+        grid-template-columns: 1fr;
+    }
+
+    .status-grid {
         grid-template-columns: 1fr;
     }
 

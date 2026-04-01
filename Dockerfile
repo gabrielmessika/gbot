@@ -26,6 +26,6 @@ RUN mkdir -p data/l2 data/trades data/features data/signals data/orders data/fil
 EXPOSE 3000
 
 ENV RUST_LOG=info
-ENV GBOT__GENERAL__MODE=observation
+ENV GBOT__GENERAL__MODE=dry-run
 
 CMD ["./gbot"]

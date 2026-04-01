@@ -19,6 +19,15 @@ pub struct GeneralSettings {
     pub mode: BotMode,
     pub log_level: String,
     pub data_dir: String,
+    /// Simulated starting equity for dry-run mode (default: $10,000)
+    #[serde(default = "GeneralSettings::default_simulated_equity")]
+    pub simulated_equity: f64,
+}
+
+impl GeneralSettings {
+    fn default_simulated_equity() -> f64 {
+        10_000.0
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

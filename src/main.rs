@@ -19,8 +19,8 @@ use gbot::features::engine::FeatureEngine;
 use gbot::market_data::book_manager::BookManager;
 use gbot::market_data::recorder::Recorder;
 use gbot::observability::dashboard::{
-    self, BookView, DashboardSnapshot, DashboardState, EventFeed, MetricsView,
-    PendingOrderView, PositionView,
+    self, BookView, BotStatusView, ClosedTradeView, DashboardSnapshot, DashboardState, EventFeed,
+    MetricsView, PendingOrderView, PositionView,
 };
 use gbot::observability::metrics::Metrics;
 use gbot::persistence::journal::Journal;
@@ -93,15 +93,21 @@ async fn main() -> Result<()> {
     };
 
     // ── Get initial equity ──
-    let initial_equity = match rest.get_equity().await {
-        Ok(eq) => {
-            info!("[MAIN] Initial equity: ${}", eq);
-            eq
+    let initial_equity = if settings.general.mode == BotMode::Live {
+        match rest.get_equity().await {
+            Ok(eq) => {
+                info!("[MAIN] Initial equity: ${}", eq);
+                eq
+            }
+            Err(e) => {
+                warn!("[MAIN] Failed to get equity: {} — using $0", e);
+                Decimal::ZERO
+            }
         }
-        Err(e) => {
-            warn!("[MAIN] Failed to get equity: {} — using $0", e);
-            Decimal::ZERO
-        }
+    } else {
+        let sim = Decimal::try_from(settings.general.simulated_equity).unwrap_or(Decimal::new(10_000, 0));
+        info!("[MAIN] Dry-run simulated equity: ${}", sim);
+        sim
     };
 
     // ── Init components ──
@@ -185,6 +191,14 @@ async fn main() -> Result<()> {
     let mut event_feed = EventFeed::new(30);
     let mut dashboard_tick = tokio::time::interval(Duration::from_millis(500));
 
+    // ── Trade history + bot status tracking ──
+    let started_at_ms = chrono::Utc::now().timestamp_millis();
+    let mut closed_trades: Vec<ClosedTradeView> = Vec::new();
+    let mut error_count: u64 = 0;
+    let mut warn_count: u64 = 0;
+    let mut last_error = String::new();
+    let mut last_error_ts: i64 = 0;
+
     loop {
         tokio::select! {
             Some(event) = event_rx.recv() => {
@@ -197,7 +211,9 @@ async fn main() -> Result<()> {
                 }
 
                 // ── Periodic equity refresh (fixes gap #4) ──
-                if now_ms - last_equity_fetch_ms > equity_fetch_interval_ms {
+                if settings.general.mode == BotMode::Live
+                    && now_ms - last_equity_fetch_ms > equity_fetch_interval_ms
+                {
                     match rest.get_equity().await {
                         Ok(eq) => {
                             current_equity = eq;
@@ -206,10 +222,13 @@ async fn main() -> Result<()> {
                             metrics.equity.set(
                                 current_equity.to_string().parse::<f64>().unwrap_or(0.0),
                             );
-                            last_equity_fetch_ms = now_ms;
                         }
-                        Err(e) => warn!("[MAIN] Equity fetch failed: {}", e),
+                        Err(e) => {
+                            warn!("[MAIN] Equity fetch failed: {}", e);
+                            warn_count += 1;
+                        }
                     }
+                    last_equity_fetch_ms = now_ms;
                 }
 
                 // Update book manager first (all events)
@@ -295,6 +314,9 @@ async fn main() -> Result<()> {
                                             .await
                                         {
                                             error!("[MAIN] Timeout exit error for {}: {}", coin, e);
+                                            error_count += 1;
+                                            last_error = format!("Timeout exit {}: {}", coin, e);
+                                            last_error_ts = now_ms;
                                         }
                                     }
                                 }
@@ -319,6 +341,9 @@ async fn main() -> Result<()> {
                                             .await
                                         {
                                             error!("[MAIN] Regime exit error for {}: {}", coin, e);
+                                            error_count += 1;
+                                            last_error = format!("Regime exit {}: {}", coin, e);
+                                            last_error_ts = now_ms;
                                         }
                                     }
                                 }
@@ -388,8 +413,11 @@ async fn main() -> Result<()> {
                                                     .process_intent(sized_intent, &rest, &meta_store)
                                                     .await
                                                 {
-                                                    error!("[MAIN] Order error for {}: {}", coin, e);
+                                                            error!("[MAIN] Order error for {}: {}", coin, e);
                                                     risk_mgr.record_error();
+                                                    error_count += 1;
+                                                    last_error = format!("Order error {}: {}", coin, e);
+                                                    last_error_ts = now_ms;
                                                     event_feed.push("risk", format!(
                                                         "{} order error: {}", coin, e
                                                     ));
@@ -488,6 +516,9 @@ async fn main() -> Result<()> {
                                                         "[MAIN] open_position_with_triggers failed for {}: {}",
                                                         filled.coin, e
                                                     );
+                                                    error_count += 1;
+                                                    last_error = format!("Trigger placement {}: {}", filled.coin, e);
+                                                    last_error_ts = now_ms;
                                                 }
 
                                                 // Update portfolio state (fixes gap #5)
@@ -505,6 +536,37 @@ async fn main() -> Result<()> {
                                             }
 
                                             Some(FillEvent::ExitFilled(closed)) => {
+                                                // Capture position data before closing
+                                                let trade_view = if let Some(pos) = position_mgr.get(&closed.coin) {
+                                                    let entry_f = pos.entry_price.to_string().parse::<f64>().unwrap_or(0.0);
+                                                    let exit_f = closed.fill_price.to_string().parse::<f64>().unwrap_or(0.0);
+                                                    let size_f = pos.size.to_string().parse::<f64>().unwrap_or(0.0);
+                                                    let (pnl_pct, pnl_usd) = if entry_f > 0.0 {
+                                                        let diff = match pos.direction {
+                                                            gbot::strategy::signal::Direction::Long => exit_f - entry_f,
+                                                            gbot::strategy::signal::Direction::Short => entry_f - exit_f,
+                                                        };
+                                                        (diff / entry_f * 100.0, diff * size_f)
+                                                    } else {
+                                                        (0.0, 0.0)
+                                                    };
+                                                    Some(ClosedTradeView {
+                                                        coin: pos.coin.clone(),
+                                                        direction: format!("{:?}", pos.direction),
+                                                        entry_price: entry_f,
+                                                        exit_price: exit_f,
+                                                        pnl_usd,
+                                                        pnl_pct,
+                                                        close_reason: closed.reason.clone(),
+                                                        opened_at: pos.opened_at,
+                                                        closed_at: now_ms,
+                                                        hold_s: (now_ms - pos.opened_at) / 1000,
+                                                        break_even_applied: pos.break_even_applied,
+                                                    })
+                                                } else {
+                                                    None
+                                                };
+
                                                 // Close position in tracker
                                                 position_mgr.close_position(
                                                     &closed.coin,
@@ -513,8 +575,15 @@ async fn main() -> Result<()> {
                                                     cooldown_s,
                                                 );
 
-                                                // Record PnL in portfolio
-                                                // (simplified: we record the closing fee; PnL computed from exchange)
+                                                // Store the closed trade
+                                                if let Some(tv) = trade_view {
+                                                    portfolio.record_pnl(
+                                                        Decimal::try_from(tv.pnl_usd).unwrap_or_default()
+                                                    );
+                                                    closed_trades.push(tv);
+                                                }
+
+                                                // Record closing fee
                                                 let notional = closed.fill_price * closed.size;
                                                 let fee = notional
                                                     * Decimal::try_from(0.00015_f64).unwrap_or_default();
@@ -667,6 +736,56 @@ async fn main() -> Result<()> {
                     kill_switch_count: metrics.kill_switch_total.get(),
                 };
 
+                // Build bot status with period breakdowns
+                let uptime_s = (now_ms - started_at_ms) / 1000;
+                let total_trades = closed_trades.len() as u32;
+                let total_wins = closed_trades.iter().filter(|t| t.pnl_usd > 0.0).count() as u32;
+                let total_losses = total_trades - total_wins;
+                let total_pnl: f64 = closed_trades.iter().map(|t| t.pnl_usd).sum();
+                let win_rate = if total_trades > 0 { total_wins as f64 / total_trades as f64 * 100.0 } else { 0.0 };
+
+                let cutoff_1h = now_ms - 3_600_000;
+                let cutoff_24h = now_ms - 86_400_000;
+                let cutoff_7d = now_ms - 604_800_000;
+
+                let trades_1h: Vec<&ClosedTradeView> = closed_trades.iter().filter(|t| t.closed_at >= cutoff_1h).collect();
+                let trades_24h: Vec<&ClosedTradeView> = closed_trades.iter().filter(|t| t.closed_at >= cutoff_24h).collect();
+                let trades_7d: Vec<&ClosedTradeView> = closed_trades.iter().filter(|t| t.closed_at >= cutoff_7d).collect();
+
+                let pnl_1h: f64 = trades_1h.iter().map(|t| t.pnl_usd).sum();
+                let pnl_24h: f64 = trades_24h.iter().map(|t| t.pnl_usd).sum();
+                let pnl_7d: f64 = trades_7d.iter().map(|t| t.pnl_usd).sum();
+
+                let wr = |trades: &[&ClosedTradeView]| -> f64 {
+                    if trades.is_empty() { 0.0 }
+                    else { trades.iter().filter(|t| t.pnl_usd > 0.0).count() as f64 / trades.len() as f64 * 100.0 }
+                };
+
+                let bot_status = BotStatusView {
+                    mode: format!("{:?}", settings.general.mode),
+                    started_at: started_at_ms,
+                    uptime_s,
+                    active_coins: coins.clone(),
+                    error_count,
+                    warn_count,
+                    last_error: last_error.clone(),
+                    last_error_ts,
+                    total_trades,
+                    total_wins,
+                    total_losses,
+                    total_pnl_usd: total_pnl,
+                    win_rate_pct: win_rate,
+                    pnl_1h,
+                    pnl_24h,
+                    pnl_7d,
+                    trades_1h: trades_1h.len() as u32,
+                    trades_24h: trades_24h.len() as u32,
+                    trades_7d: trades_7d.len() as u32,
+                    win_rate_1h: wr(&trades_1h),
+                    win_rate_24h: wr(&trades_24h),
+                    win_rate_7d: wr(&trades_7d),
+                };
+
                 let snap = DashboardSnapshot {
                     ts: now_ms,
                     equity: eq_f64,
@@ -677,6 +796,8 @@ async fn main() -> Result<()> {
                     books: book_views,
                     metrics: metrics_view,
                     events: event_feed.snapshot(),
+                    closed_trades: closed_trades.clone(),
+                    bot_status,
                 };
 
                 *dashboard_snapshot.write().await = snap;
