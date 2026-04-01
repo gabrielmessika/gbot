@@ -58,7 +58,7 @@ Bot de trading algorithmique haute fréquence pour **Hyperliquid**, implémenté
 | `risk` | `manager.rs` | Veto absolu : 8 règles par trade, 7 règles portfolio, drawdown throttle/circuit breaker |
 | `portfolio` | `state.rs` | État interne : positions, PnL réalisé, fees, funding, marge |
 | `persistence` | `journal.rs`, `parquet_writer.rs` | Journal JSONL structuré, conversion Arrow/Parquet (`convert_book_jsonl`, `convert_trade_jsonl`) |
-| `observability` | `metrics.rs`, `dashboard.rs` | 12 métriques Prometheus, dashboard HTTP (health, metrics, status) |
+| `observability` | `metrics.rs`, `dashboard.rs` | 12 métriques Prometheus, dashboard HTTP (SSE temps réel, snapshot JSON) |
 | `backtest` | `replay_engine.rs`, `runner.rs`, `sim_book.rs`, `sim_execution.rs` | Replay de données JSONL enregistrées à travers le pipeline complet (features → régime → stratégie), fill probabiliste |
 
 ## Features de scoring
@@ -156,7 +156,8 @@ cargo run --release
 docker build -t gbot .
 docker run -d --name gbot \
   -e GBOT__GENERAL__MODE=observation \
-  -p 3030:3030 \
+  -p 3000:3000 \
+  -v $(pwd)/data:/app/data \
   gbot
 ```
 
@@ -164,9 +165,25 @@ docker run -d --name gbot \
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Health check (`{ "status": "ok" }`) |
+| `GET /` | Dashboard UI (single page HTML/JS/CSS) |
+| `GET /api/state` | Snapshot JSON complet (positions, books, métriques, events) |
+| `GET /api/stream` | SSE temps réel — push toutes les 500ms |
+| `GET /health` | Health check |
 | `GET /metrics` | Métriques Prometheus (text format) |
-| `GET /api/status` | État JSON : mode, uptime, positions, equity, drawdown |
+
+### Dashboard UI
+
+Single page verticale sans onglets, 4 zones toujours visibles :
+
+1. **Header** — Equity, Daily P&L, Drawdown, nombre de positions, indicateur live (vert/rouge/gris)
+2. **Carnet en temps réel** (gauche) — Par coin actif : spread, imbalance (barre [-1,+1]), micro-price, toxicité (jauge), régime (badge coloré), éligibilité ALO
+3. **Positions & Ordres** (droite) — Positions ouvertes avec P&L live, SL/TP, break-even, elapsed + ordres pending avec timer
+4. **Métriques session** — Fill rate, adverse selection, spread capture, queue lag, reconnects, kill-switch
+5. **Feed d'événements** — 30 derniers événements (fills, changements de régime, rejets risk, reconnects) colorés par type
+
+Stack : HTML + JS vanilla + CSS custom (dark theme). Pas de dépendance externe, pas de CDN. SSE unique, pas de polling.
+
+Accès : `http://localhost:3000` (local) ou via tunnel SSH (`ssh -L 3000:127.0.0.1:3000 gbot`). Voir `docs/deployment.md`.
 
 ## Gestion du risque
 
@@ -203,7 +220,7 @@ docker run -d --name gbot \
 | 4 | Position lifecycle complet (BE, trailing, sync, recovery) | ✅ |
 | 5 | Backtest sur données enregistrées (`BacktestRunner`) | ✅ |
 | 6 | Dry-run / Live trading (taille minimale) | 🔲 |
-| 7 | UI de monitoring (dashboard SSE + métriques) | 🔲 |
+| 7 | UI de monitoring (dashboard SSE + métriques) | ✅ |
 
 ## Protections intégrées (leçons de t-bot)
 
@@ -236,7 +253,8 @@ docker run -d --name gbot \
 | Maps concurrentes | dashmap | 6.x |
 | Configuration | config | 0.14 (TOML) |
 | Métriques | prometheus | 0.13 |
-| Dashboard HTTP | axum + tower-http | 0.7 / 0.5 |
+| Dashboard HTTP | axum + tower-http (fs) | 0.7 / 0.5 |
+| SSE streaming | tokio-stream + futures-util | 0.1 / 0.3 |
 | Tracing | tracing + tracing-subscriber | 0.1 / 0.3 |
 | Stockage columnar | arrow + parquet | 53 |
 

@@ -29,7 +29,8 @@ k256             = { version = "0.13", features = ["ecdsa"] }
 rand             = "0.8"
 axum             = { version = "0.7", features = ["ws"] }
 axum-extra       = { version = "0.9", features = ["typed-header"] }
-tower-http       = { version = "0.5", features = ["cors"] }
+tower-http       = { version = "0.5", features = ["cors", "fs"] }
+tokio-stream     = "0.1"
 prometheus       = "0.13"
 arrow            = { version = "53", default-features = false }
 parquet          = { version = "53", default-features = false, features = ["arrow"] }

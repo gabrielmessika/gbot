@@ -513,6 +513,11 @@ impl OrderManager {
         &self.pending_orders
     }
 
+    /// Get all trade states per coin.
+    pub fn all_states(&self) -> &HashMap<String, TradeState> {
+        &self.states
+    }
+
     /// Check for timed-out resting orders and return cancel intents.
     pub fn check_timeouts(&mut self, now_ms: i64) -> Vec<Intent> {
         let mut cancels = Vec::new();

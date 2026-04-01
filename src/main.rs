@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use rust_decimal::Decimal;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
 use gbot::config::coins::CoinMetaStore;
@@ -17,7 +18,10 @@ use gbot::execution::position_manager::{OpenPosition, PositionManager};
 use gbot::features::engine::FeatureEngine;
 use gbot::market_data::book_manager::BookManager;
 use gbot::market_data::recorder::Recorder;
-use gbot::observability::dashboard::{self, DashboardState};
+use gbot::observability::dashboard::{
+    self, BookView, DashboardSnapshot, DashboardState, EventFeed, MetricsView,
+    PendingOrderView, PositionView,
+};
 use gbot::observability::metrics::Metrics;
 use gbot::persistence::journal::Journal;
 use gbot::portfolio::state::PortfolioState;
@@ -141,7 +145,11 @@ async fn main() -> Result<()> {
     };
 
     // ── Start dashboard ──
-    let dashboard_state = Arc::new(DashboardState { metrics: metrics.clone() });
+    let dashboard_snapshot = Arc::new(RwLock::new(DashboardSnapshot::default()));
+    let dashboard_state = Arc::new(DashboardState {
+        metrics: metrics.clone(),
+        snapshot: dashboard_snapshot.clone(),
+    });
     tokio::spawn(async move {
         dashboard::start_dashboard(dashboard_state, 3000).await;
     });
@@ -170,6 +178,11 @@ async fn main() -> Result<()> {
     let mut reconnect_recent = false;
     let mut reconnect_clear_at: i64 = 0;
     let cooldown_s = settings.risk.cooldown_after_close_s;
+
+    // ── Dashboard state ──
+    let mut regimes: HashMap<String, regime_engine::Regime> = HashMap::new();
+    let mut event_feed = EventFeed::new(30);
+    let mut dashboard_tick = tokio::time::interval(Duration::from_millis(500));
 
     loop {
         tokio::select! {
@@ -225,6 +238,15 @@ async fn main() -> Result<()> {
                                 &settings.regime,
                                 None, // funding seconds — not yet fetched; None = no restriction
                             );
+
+                            // Track regime for dashboard + push event on change
+                            let prev_regime = regimes.get(coin).copied();
+                            if prev_regime != Some(regime) {
+                                if prev_regime.is_some() {
+                                    event_feed.push("regime", format!("{} regime → {:?}", coin, regime));
+                                }
+                                regimes.insert(coin.clone(), regime);
+                            }
 
                             let current_mid = book_mgr.mids.get(coin).map(|m| *m).unwrap_or(0.0);
 
@@ -358,18 +380,27 @@ async fn main() -> Result<()> {
                                             &position_mgr,
                                         ) {
                                             Ok(()) => {
+                                                event_feed.push("order", format!(
+                                                    "{} entry placed", coin
+                                                ));
                                                 if let Err(e) = order_mgr
                                                     .process_intent(sized_intent, &rest, &meta_store)
                                                     .await
                                                 {
                                                     error!("[MAIN] Order error for {}: {}", coin, e);
                                                     risk_mgr.record_error();
+                                                    event_feed.push("risk", format!(
+                                                        "{} order error: {}", coin, e
+                                                    ));
                                                 }
                                             }
                                             Err(reasons) => {
                                                 for r in &reasons {
                                                     info!("[RISK] Rejected {}: {}", coin, r);
                                                 }
+                                                event_feed.push("risk", format!(
+                                                    "{} rejected: {}", coin, reasons.join(", ")
+                                                ));
                                             }
                                         }
                                     }
@@ -465,6 +496,11 @@ async fn main() -> Result<()> {
                                                 portfolio.record_fee(fee);
                                                 metrics.passive_fill_count.inc();
                                                 metrics.open_positions.set(position_mgr.count() as i64);
+
+                                                event_feed.push("fill", format!(
+                                                    "{} {:?} filled @ {} (size={})",
+                                                    filled.coin, filled.direction, filled.fill_price, filled.size
+                                                ));
                                             }
 
                                             Some(FillEvent::ExitFilled(closed)) => {
@@ -483,6 +519,11 @@ async fn main() -> Result<()> {
                                                     * Decimal::try_from(0.00015_f64).unwrap_or_default();
                                                 portfolio.record_fee(fee);
                                                 metrics.open_positions.set(position_mgr.count() as i64);
+
+                                                event_feed.push("fill", format!(
+                                                    "{} closed @ {} — {}",
+                                                    closed.coin, closed.fill_price, closed.reason
+                                                ));
                                             }
 
                                             None => {} // Partial fill — state already updated
@@ -509,6 +550,7 @@ async fn main() -> Result<()> {
                         reconnect_recent = true;
                         reconnect_clear_at = now_ms + 10_000;
                         metrics.ws_reconnect_total.inc();
+                        event_feed.push("system", "WebSocket reconnected — pausing 10s".into());
                     }
 
                     WsEvent::SnapshotLoaded { coin } => {
@@ -543,6 +585,100 @@ async fn main() -> Result<()> {
                     0.0
                 };
                 metrics.drawdown_pct.set(dd_pct);
+            }
+
+            // ── Dashboard snapshot (every 500ms) ──
+            _ = dashboard_tick.tick() => {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let eq_f64 = current_equity.to_string().parse::<f64>().unwrap_or(0.0);
+                let init_f64 = initial_equity.to_string().parse::<f64>().unwrap_or(0.0);
+                let dd = if init_f64 > 0.0 { ((init_f64 - eq_f64) / init_f64 * 100.0).max(0.0) } else { 0.0 };
+                let daily_start_f64 = portfolio.daily_start_balance.to_string().parse::<f64>().unwrap_or(0.0);
+                let daily_pnl = eq_f64 - daily_start_f64;
+
+                // Build position views
+                let mut pos_views = Vec::new();
+                for pos in position_mgr.all().values() {
+                    let mid = book_mgr.mids.get(&pos.coin).map(|m| *m).unwrap_or(0.0);
+                    let entry_f = pos.entry_price.to_string().parse::<f64>().unwrap_or(0.0);
+                    let size_f = pos.size.to_string().parse::<f64>().unwrap_or(0.0);
+                    let (pnl_pct, pnl_usd) = if entry_f > 0.0 {
+                        let diff = match pos.direction {
+                            gbot::strategy::signal::Direction::Long => mid - entry_f,
+                            gbot::strategy::signal::Direction::Short => entry_f - mid,
+                        };
+                        (diff / entry_f * 100.0, diff * size_f)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    pos_views.push(PositionView {
+                        coin: pos.coin.clone(),
+                        direction: format!("{:?}", pos.direction),
+                        state: "InPosition".into(),
+                        entry_price: entry_f,
+                        current_price: mid,
+                        pnl_pct,
+                        pnl_usd,
+                        elapsed_s: (now_ms - pos.opened_at) / 1000,
+                        break_even_applied: pos.break_even_applied,
+                        sl: pos.stop_loss.to_string().parse::<f64>().unwrap_or(0.0),
+                        tp: pos.take_profit.to_string().parse::<f64>().unwrap_or(0.0),
+                    });
+                }
+
+                // Build pending order views
+                let mut pending_views = Vec::new();
+                for order in order_mgr.pending_orders().values() {
+                    if order.status == gbot::execution::order_manager::PendingOrderStatus::Working {
+                        pending_views.push(PendingOrderView {
+                            coin: order.coin.clone(),
+                            direction: format!("{:?}", order.direction),
+                            state: "EntryWorking".into(),
+                            price: order.price.to_string().parse::<f64>().unwrap_or(0.0),
+                            placed_s_ago: (now_ms - order.placed_at) / 1000,
+                            max_wait_s: order.max_wait_s,
+                        });
+                    }
+                }
+
+                // Build book views
+                let mut book_views = HashMap::new();
+                for coin in &coins {
+                    if let Some(feats) = feature_engine.get(coin) {
+                        let regime = regimes.get(coin).copied().unwrap_or(regime_engine::Regime::LowSignal);
+                        book_views.insert(coin.clone(), BookView {
+                            spread_bps: feats.book.spread_bps,
+                            imbalance_top5: feats.book.imbalance_top5,
+                            micro_price_vs_mid_bps: feats.book.micro_price_vs_mid_bps,
+                            toxicity: feats.flow.toxicity_proxy_instant,
+                            regime: format!("{:?}", regime),
+                        });
+                    }
+                }
+
+                // Build metrics view
+                let metrics_view = MetricsView {
+                    maker_fill_rate_1h: metrics.maker_share.get(),
+                    adverse_selection_rate_1h: metrics.adverse_selection_rate.get(),
+                    spread_capture_bps_session: metrics.spread_capture_bps.get(),
+                    ws_reconnects_today: metrics.ws_reconnect_total.get(),
+                    queue_lag_ms_p95: metrics.queue_lag_ms.get(),
+                    kill_switch_count: metrics.kill_switch_total.get(),
+                };
+
+                let snap = DashboardSnapshot {
+                    ts: now_ms,
+                    equity: eq_f64,
+                    drawdown_pct: dd,
+                    daily_pnl,
+                    positions: pos_views,
+                    pending_orders: pending_views,
+                    books: book_views,
+                    metrics: metrics_view,
+                    events: event_feed.snapshot(),
+                };
+
+                *dashboard_snapshot.write().await = snap;
             }
 
             else => {

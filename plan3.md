@@ -1119,19 +1119,23 @@ L'UI n'est **pas** une interface de contrôle (pas de boutons "place order", "cl
 
 Stack délibérément minimaliste : HTML + JS vanilla + CSS custom, servi statiquement par Axum. Pas de React, pas de bundler, pas de Node. Même approche que tbot — aucune friction de build.
 
+**Statut** : ✅ Implémenté. Fichiers dans `static/` (index.html, css/styles.css, js/app.js). Servi par `tower_http::services::ServeDir` via Axum.
+
 #### Architecture
 
 ```
 Axum (Rust)
-  GET /               → sert static/index.html
-  GET /static/*       → sert CSS, JS
-  GET /api/state      → snapshot JSON complet
-  GET /api/stream     → SSE : push toutes les 500ms
+  GET /               → sert static/index.html (fallback ServeDir)
+  GET /static/*       → sert CSS, JS (tower-http ServeDir)
+  GET /api/state      → snapshot JSON complet (DashboardSnapshot)
+  GET /api/stream     → SSE : push toutes les 500ms (unfold stream)
   GET /metrics        → Prometheus (scraping machine)
   GET /health         → healthcheck
 ```
 
 Le frontend s'abonne au SSE `/api/stream` pour les mises à jour temps réel. Pas de polling — une seule connexion persistante.
+
+**Implémentation** : `src/observability/dashboard.rs` expose un `DashboardState` contenant un `Arc<RwLock<DashboardSnapshot>>`. Le main loop écrit le snapshot toutes les 500ms via un `tokio::time::interval` dans le `select!`. Le SSE stream lit le `RwLock` et pousse le JSON sérialisé.
 
 #### Payload SSE (`/api/stream`)
 
@@ -1253,11 +1257,11 @@ Chaque ligne est colorée par type : fill=bleu, régime=violet, risque=rouge, or
 
 #### Checklist UI
 
-- [ ] Header toujours visible avec indicateur live (rouge si WS book silencieux > 5s)
-- [ ] Régime par coin mis à jour < 1s après le changement
-- [ ] Feed d'événements en temps réel via SSE (pas de polling)
-- [ ] Responsive minimum (lisible sur un écran de laptop, pas forcément mobile)
-- [ ] Pas de dépendance externe (pas de CDN — si le réseau est coupé, l'UI doit quand même charger)
+- [x] Header toujours visible avec indicateur live (rouge si WS book silencieux > 5s)
+- [x] Régime par coin mis à jour < 1s après le changement
+- [x] Feed d'événements en temps réel via SSE (pas de polling)
+- [x] Responsive minimum (lisible sur un écran de laptop, pas forcément mobile)
+- [x] Pas de dépendance externe (pas de CDN — si le réseau est coupé, l'UI doit quand même charger)
 
 ### 14.5. Alertes temps réel
 
