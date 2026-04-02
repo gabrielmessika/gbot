@@ -1,5 +1,83 @@
 # Changelog
 
+## 2026-04-02 16h02 — Pivot signal + regime filter refactor
+
+### Pivot signal : OFI → Price Momentum (empiriquement prouvé)
+
+**Contexte** : analyse des données du serveur (dry-run 2026-04-01/02) a révélé que l'OFI est du bruit sur Hyperliquid (corr=+0.058, WR=2.3% directionnel). Le prix momentum (pr5s) est le signal dominant (corr=+0.354, WR=68% en marché tendanciel).
+
+#### `src/features/flow_features.rs`
+- Ajout des champs `price_return_5s`, `price_return_10s`, `price_return_30s` dans `FlowFeatures`
+- Ajout des appels `compute_price_return(tape, now_ms, N)` dans `compute_flow_features()`
+- Ajout de la fonction `compute_price_return()` : retourne `(last_price - first_price) / first_price × 10_000` en bps, 0.0 si < 2 trades dans la fenêtre
+- OFI conservé pour observabilité mais n'est plus utilisé dans le scoring directionnel
+
+#### `src/strategy/mfdp.rs`
+- **Refonte complète de `compute_direction_score()`** : remplace OFI + aggression par price momentum
+  - Nouveau : `w_pr5s × sign(pr5s) × min(|pr5s|/5, 1) + w_pr10s × sign(pr10s) × min(|pr10s|/10, 1)`
+  - Conservé : `w_micro_price × micro_norm + w_vamp × vamp_norm + w_depth_imb × depth_imbalance`
+  - Penalité : `- w_toxicity × toxicity_penalty`
+  - `depth_signed` (depth_ratio - 1) remplacé par `imbalance_weighted` (déjà signé, multi-niveau)
+- Ajout de `Regime::RangingMarket` dans le gate de régime (no-trade)
+- Log debug mis à jour : affiche `pr5s`, `pr10s`, `depth_imb` au lieu de `ofi_10s`, `aggression`
+- `max_wait_pullback_s` → `pullback_wait_retrace_s`
+
+#### `src/regime/engine.rs`
+- Ajout du variant `RangingMarket` dans l'enum `Regime`
+- Classification : si `|price_return_30s| < trending_min_bps` → `RangingMarket` (no-entry)
+  - Placement après LowSignal dans la cascade pour que les filtres spread/vol s'appliquent d'abord
+- `allows_entry()` : `RangingMarket` exclu (comme LowSignal)
+- **Justification empirique** : WR directionnel = 0% quand |pr30s| < 3bps (marché plat)
+
+#### `src/strategy/pullback.rs`
+- **Correction bug majeur** : WaitingMove et WaitingPullback partageaient le même `expires_at`
+  - Symptôme : 45/50 setups avortaient (WaitingMove consommait ~20s → WaitingPullback avait <10s)
+  - Fix : `max_wait_ms` → `wait_move_ms` + `wait_retrace_ms` indépendants
+  - À la transition WaitingMove → WaitingPullback : `expires_at` reset à `now_ms + wait_retrace_ms`
+
+#### `src/config/settings.rs`
+- `StrategySettings` : suppression `w_ofi`, `w_aggression`, `w_depth_ratio`, `max_wait_pullback_s`
+- `StrategySettings` : ajout `w_pr5s`, `w_pr10s`, `w_depth_imb`, `pullback_wait_move_s`, `pullback_wait_retrace_s`
+- `StrategySettings` : défauts mis à jour (`sl_min_bps=12.0`, `sl_vol_multiplier=4.0`, `target_rr=1.5`, `pullback_min_move_bps=1.5`)
+- `RegimeSettings` : ajout `trending_min_bps` (défaut 3.0 bps), avec `impl RegimeSettings::default_trending_min_bps()`
+- `RiskSettings` : ajout `max_signals_per_coin_10min` (défaut 6), avec `impl RiskSettings::default_max_signals_per_coin_10min()`
+
+#### `src/main.rs`
+- Construction de `PullbackSettings` : `max_wait_ms` → `wait_move_ms` + `wait_retrace_ms`
+- Ajout quota signal par coin (fenêtre glissante 10min) : `coin_signal_timestamps: HashMap<String, VecDeque<i64>>`
+  - Avant chaque émission de signal : purge des timestamps > 10min, vérification quota
+  - Si `ts_queue.len() >= max_signals_per_coin_10min` → skip avec log debug
+  - **Justification** : ETH reçoit ~10× plus de BookUpdates → monopolisait les signaux (5 trades en 2h)
+
+#### `config/default.toml`
+| Paramètre | Avant | Après | Raison |
+|-----------|-------|-------|--------|
+| `max_hold_s` | 600 | 45 | Autocorrélation momentum → 0 à 60s |
+| `sl_min_bps` | 8.0 | 12.0 | Floor trop bas → SL sur le bruit |
+| `pullback_min_move_bps` | 3.0 | 1.5 | Seuil trop élevé → peu de setups |
+| `pullback_wait_move_s` | — | 20 | Phase WaitingMove indépendante |
+| `pullback_wait_retrace_s` | — | 20 | Phase WaitingPullback indépendante |
+| `max_wait_pullback_s` | 30 | supprimé | Remplacé par les deux ci-dessus |
+| `w_ofi` | 0.25 | supprimé | corr=+0.058 → bruit |
+| `w_aggression` | 0.15 | supprimé | Colinéaire à OFI (corr=0.999) |
+| `w_depth_ratio` | 0.10 | supprimé | Remplacé par `w_depth_imb` |
+| `w_pr5s` | — | 0.40 | Signal primaire (corr=+0.354) |
+| `w_pr10s` | — | 0.20 | Momentum secondaire |
+| `w_depth_imb` | — | 0.15 | Profondeur multi-niveau signée |
+| `trending_min_bps` | — | 3.0 | Filtre marché plat |
+| `max_signals_per_coin_10min` | — | 6 | Quota anti-monopole |
+
+#### `src/market_data/recorder.rs` (session précédente)
+- Ajout `bid_levels: Vec<[f64; 2]>` et `ask_levels: Vec<[f64; 2]>` dans `BookRecord`
+- `record_book()` : population via `book.top_bids(10)` et `book.top_asks(10)`
+- Fichiers L2 ~3× plus volumineux — nécessaire pour valider le multi-level OBI
+
+#### `research/scripts/analyze_obi_levels.py` (nouveau)
+- Script d'analyse OBI multi-niveau (L1 à L10) sur les données JSONL du recorder
+- Calcule `corr(obi_lN, ret_30s)` et WR directionnel pour chaque profondeur
+- **Critère de décision** : OBI_LN doit avoir `|corr| >= 2× |corr_L1|` pour justifier l'implémentation
+- Usage : `python analyze_obi_levels.py --data-dir ./data/l2 --coin ETH`
+
 ## 2026-04-02 — P0 bug fix + config tuning post dry-run analysis
 
 Analysis of the 2026-04-01/02 dry-run session (28 trades, WR=39%, P&L=-$90.38) revealed a critical bug and several config issues. The bot was stuck in DoNotTrade for 16h+ after a WS reconnect.

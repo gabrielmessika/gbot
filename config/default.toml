@@ -79,24 +79,29 @@ funding_boundary_force_exit_s = 30
 # Cancel/add ratio
 max_cancel_add_ratio = 0.9
 
+# Ranging filter: minimum |price_return_30s| in bps for market to be considered trending.
+# Below this → RangingMarket regime (no entries). Empirical: WR=0% in flat market.
+trending_min_bps = 3.0
+
 [strategy]
-# Direction score weights
-w_ofi = 0.25
-w_micro_price = 0.20
-w_vamp = 0.20
-w_aggression = 0.15
-w_depth_ratio = 0.10
-w_toxicity = 0.10
+# Direction score weights — primary: price momentum (corr=+0.354 vs OFI corr=+0.058)
+w_pr5s = 0.40         # price_return_5s normalized (5bps = full signal)
+w_pr10s = 0.20        # price_return_10s normalized (10bps = full signal)
+w_micro_price = 0.15  # micro_price_vs_mid_bps
+w_vamp = 0.15         # vamp_signal_bps
+w_depth_imb = 0.15    # imbalance_weighted (signed book depth)
+w_toxicity = 0.10     # penalty
 
 # Thresholds
 direction_threshold_long = 0.52
 direction_threshold_short = -0.52
 
-# Pullback entry timing (Phase 7.5)
-pullback_retrace_pct = 0.35     # Enter after 35% retrace of the micro-move
-max_wait_pullback_s = 30        # Abandon if no pullback within 30s
-pullback_min_move_bps = 3.0     # Minimum micro-move (bps) to arm the pullback wait
-pullback_ofi_confirm = 0.0      # OFI 10s threshold post-pullback (0.0 = any directional OFI)
+# Pullback entry timing — independent timeouts per phase (bug fix: shared budget = 5/50 setups failed)
+pullback_retrace_pct = 0.35       # Enter after 35% retrace of the micro-move
+pullback_wait_move_s = 20         # Abandon WaitingMove phase after 20s
+pullback_wait_retrace_s = 20      # Abandon WaitingPullback phase after 20s (independent budget)
+pullback_min_move_bps = 1.5       # Minimum micro-move (bps) to arm the pullback wait (was 3.0)
+pullback_ofi_confirm = 0.0        # OFI 10s threshold post-pullback (0.0 = any directional OFI)
 
 # Queue desirability weights
 queue_w_spread = 0.25
@@ -108,7 +113,7 @@ queue_score_threshold = 0.5
 
 # Dynamic SL/TP — SL = max(sl_min_bps, sl_vol_multiplier × realized_vol_30s), capped at sl_max_bps
 sl_vol_multiplier = 4.0   # SL = 4× realized 30s volatility
-sl_min_bps = 8.0          # Minimum SL distance (8 bps floor)
+sl_min_bps = 12.0         # Minimum SL distance (12 bps floor, was 8.0 — tighter to avoid noise)
 sl_max_bps = 80.0         # Maximum SL distance (80 bps cap)
 target_rr = 1.5           # TP = SL × target_rr
 
@@ -135,6 +140,9 @@ min_depth_usd = 5000.0
 max_toxicity = 0.7
 max_vol_ratio = 3.0
 equity_spike_guard_pct = 5.0
+# Per-coin signal quota: max signals per coin in any rolling 10-minute window.
+# Prevents ETH/BTC monopoly due to higher BookUpdate event rate.
+max_signals_per_coin_10min = 6
 
 [risk.leverage]
 min_leverage = 1
@@ -142,7 +150,7 @@ max_leverage = 20
 default_leverage = 10
 
 [execution]
-max_hold_s = 600          # 10 minutes
+max_hold_s = 45           # ~45s: momentum autocorrelation decays to ~0 at 60s
 max_mae_bps = 15.0        # max adverse excursion
 order_timeout_s = 60
 fill_poll_interval_s = 5

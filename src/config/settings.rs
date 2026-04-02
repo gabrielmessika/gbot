@@ -109,22 +109,39 @@ pub struct RegimeSettings {
     pub funding_boundary_no_entry_s: u64,
     pub funding_boundary_force_exit_s: u64,
     pub max_cancel_add_ratio: f64,
+
+    /// Minimum abs(price_return_30s) in bps for the market to be considered trending.
+    /// Below this threshold → RangingMarket regime (no entries).
+    #[serde(default = "RegimeSettings::default_trending_min_bps")]
+    pub trending_min_bps: f64,
+}
+
+impl RegimeSettings {
+    fn default_trending_min_bps() -> f64 { 3.0 }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StrategySettings {
-    pub w_ofi: f64,
+    // ── Direction score weights ────────────────────────────────────────────
+    // Primary: price momentum (empirical corr=+0.354 with ret30s)
+    pub w_pr5s: f64,
+    pub w_pr10s: f64,
+    // Secondary: book microstructure
     pub w_micro_price: f64,
     pub w_vamp: f64,
-    pub w_aggression: f64,
-    pub w_depth_ratio: f64,
+    pub w_depth_imb: f64,
+    // Penalty
     pub w_toxicity: f64,
 
     pub direction_threshold_long: f64,
     pub direction_threshold_short: f64,
 
+    // ── Pullback timing ───────────────────────────────────────────────────
     pub pullback_retrace_pct: f64,
-    pub max_wait_pullback_s: u64,
+    /// Max seconds to wait for the initial micro-move (WaitingMove phase).
+    pub pullback_wait_move_s: u64,
+    /// Max seconds to wait for the retrace after micro-move confirmed (WaitingPullback phase).
+    pub pullback_wait_retrace_s: u64,
 
     pub queue_w_spread: f64,
     pub queue_w_imbalance: f64,
@@ -151,7 +168,7 @@ pub struct StrategySettings {
     #[serde(default = "StrategySettings::default_min_trades_for_signal")]
     pub min_trades_for_signal: usize,
 
-    // ── Phase 7.5: Pullback entry timing ──────────────────────────────────
+    // ── Pullback entry timing ──────────────────────────────────────────────
     // Minimum micro-move (bps) required to arm pullback wait.
     #[serde(default = "StrategySettings::default_pullback_min_move_bps")]
     pub pullback_min_move_bps: f64,
@@ -163,13 +180,13 @@ pub struct StrategySettings {
 }
 
 impl StrategySettings {
-    fn default_sl_vol_multiplier() -> f64 { 2.5 }
-    fn default_sl_min_bps() -> f64 { 15.0 }
+    fn default_sl_vol_multiplier() -> f64 { 4.0 }
+    fn default_sl_min_bps() -> f64 { 12.0 }
     fn default_sl_max_bps() -> f64 { 80.0 }
-    fn default_target_rr() -> f64 { 2.0 }
+    fn default_target_rr() -> f64 { 1.5 }
     fn default_min_direction_confirmations() -> u32 { 3 }
     fn default_min_trades_for_signal() -> usize { 5 }
-    fn default_pullback_min_move_bps() -> f64 { 3.0 }
+    fn default_pullback_min_move_bps() -> f64 { 1.5 }
     fn default_pullback_ofi_confirm() -> f64 { 0.0 }
 }
 
@@ -192,6 +209,15 @@ pub struct RiskSettings {
     pub max_vol_ratio: f64,
     pub equity_spike_guard_pct: f64,
     pub leverage: LeverageSettings,
+
+    /// Max signals emitted per coin in any rolling 10-minute window.
+    /// Prevents ETH/BTC monopoly due to higher BookUpdate rate.
+    #[serde(default = "RiskSettings::default_max_signals_per_coin_10min")]
+    pub max_signals_per_coin_10min: u32,
+}
+
+impl RiskSettings {
+    fn default_max_signals_per_coin_10min() -> u32 { 6 }
 }
 
 #[derive(Debug, Clone, Deserialize)]

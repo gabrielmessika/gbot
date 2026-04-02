@@ -21,6 +21,8 @@ pub enum Regime {
     NewslikeChaos,
     /// Marché trop calme, pas assez d'edge — pas de trade.
     LowSignal,
+    /// Marché sans tendance (|price_return_30s| < trending_min_bps) — momentum nul.
+    RangingMarket,
     /// Kill-switch, circuit breaker, reconnect, book stale.
     DoNotTrade,
 }
@@ -29,6 +31,7 @@ impl Regime {
     /// Whether this regime allows new entries.
     pub fn allows_entry(&self) -> bool {
         matches!(self, Regime::QuietTight | Regime::QuietThin | Regime::ActiveHealthy)
+        // Note: RangingMarket and LowSignal are excluded — no directional edge
     }
 
     /// Whether positions should be force-exited.
@@ -126,6 +129,12 @@ pub fn classify(
     // ── LowSignal (catch-all for quiet markets with insufficient conditions) ──
     if features.flow.trade_intensity < 1.0 {
         return Regime::LowSignal;
+    }
+
+    // ── RangingMarket: price flat over 30s → no directional momentum ──
+    // Empirically: directional_acc=0% in flat market (|pr30s| < trending_min_bps).
+    if features.flow.price_return_30s.abs() < settings.trending_min_bps {
+        return Regime::RangingMarket;
     }
 
     // Default: ActiveHealthy if nothing else matched

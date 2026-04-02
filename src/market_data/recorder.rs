@@ -22,6 +22,10 @@ pub struct BookRecord {
     pub ask_depth_10bps: f64,
     pub spread_bps: f64,
     pub mid: f64,
+    /// Top 10 bid levels [price, size] for multi-level OBI analysis.
+    pub bid_levels: Vec<[f64; 2]>,
+    /// Top 10 ask levels [price, size] for multi-level OBI analysis.
+    pub ask_levels: Vec<[f64; 2]>,
 }
 
 /// Row for trades recording.
@@ -85,6 +89,8 @@ impl Recorder {
             ask_depth_10bps: book.ask_depth_within_bps(10.0),
             spread_bps: book.spread_bps().unwrap_or(0.0),
             mid: book.mid().unwrap_or(0.0),
+            bid_levels: book.top_bids(10).iter().map(|l| [l.price, l.size]).collect(),
+            ask_levels: book.top_asks(10).iter().map(|l| [l.price, l.size]).collect(),
         };
 
         let mut buffers = self.book_buffers.lock().await;

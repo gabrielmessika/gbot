@@ -31,8 +31,10 @@ pub struct PullbackSettings {
     pub min_move_bps: f64,
     /// Retrace minimum exprimé en fraction du micro-move (ex: 0.35 = 35%).
     pub retrace_pct: f64,
-    /// Délai maximum d'attente pour que le pullback se réalise (ms).
-    pub max_wait_ms: i64,
+    /// Délai maximum pour que le micro-move se produise (phase WaitingMove), ms.
+    pub wait_move_ms: i64,
+    /// Délai maximum pour que le retrace se produise après micro-move confirmé (phase WaitingPullback), ms.
+    pub wait_retrace_ms: i64,
     /// Seuil OFI 10s pour confirmer la reprise directionnelle post-pullback.
     /// Pour un Long : ofi_10s > threshold. Pour un Short : ofi_10s < -threshold.
     pub ofi_confirm_threshold: f64,
@@ -139,15 +141,16 @@ impl PullbackTracker {
         now_ms: i64,
         settings: &PullbackSettings,
     ) {
-        let expires_at = now_ms + settings.max_wait_ms;
+        let expires_at = now_ms + settings.wait_move_ms;
         debug!(
-            "[PULLBACK] {} {} setup started: mid={:.4} sl={:.4}% tp={:.4}% expires_in={}s",
+            "[PULLBACK] {} {} setup started: mid={:.4} sl={:.4}% tp={:.4}% move_timeout={}s retrace_timeout={}s",
             coin,
             format!("{:?}", direction),
             initial_mid,
             sl_pct * 100.0,
             tp_pct * 100.0,
-            settings.max_wait_ms / 1000,
+            settings.wait_move_ms / 1000,
+            settings.wait_retrace_ms / 1000,
         );
         self.states.insert(
             coin.to_string(),
@@ -257,19 +260,21 @@ impl PullbackTracker {
                 };
 
                 if move_bps >= settings.min_move_bps {
-                    // Micro-move confirmé → passer en WaitingPullback
+                    // Micro-move confirmé → passer en WaitingPullback avec son propre timeout
+                    let retrace_expires_at = now_ms + settings.wait_retrace_ms;
                     debug!(
-                        "[PULLBACK] {} {} micro-move confirmed: {:.2}bps (min: {:.2}bps) → waiting pullback",
+                        "[PULLBACK] {} {} micro-move confirmed: {:.2}bps (min: {:.2}bps) → waiting pullback ({}s)",
                         coin,
                         format!("{:?}", direction),
                         move_bps,
                         settings.min_move_bps,
+                        settings.wait_retrace_ms / 1000,
                     );
                     *phase = Phase::WaitingPullback {
                         direction,
                         initial_mid,
                         extreme_mid,
-                        expires_at,
+                        expires_at: retrace_expires_at,
                         sl_pct,
                         tp_pct,
                         size,

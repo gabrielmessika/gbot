@@ -224,6 +224,13 @@ async fn main() -> Result<()> {
     let min_confirmations = settings.strategy.min_direction_confirmations;
     let min_trades_for_signal = settings.strategy.min_trades_for_signal;
 
+    // ── Per-coin signal quota (rolling 10min window) ──
+    // Prevents high-frequency coins (ETH, BTC) from monopolizing all signals.
+    // Each entry is a VecDeque of signal timestamps (ms) within the last 10 minutes.
+    let mut coin_signal_timestamps: HashMap<String, std::collections::VecDeque<i64>> = HashMap::new();
+    let max_signals_per_coin_10min = settings.risk.max_signals_per_coin_10min;
+    let signal_quota_window_ms: i64 = 600_000; // 10 minutes
+
     // ── Phase 7.5: Pullback tracker ──────────────────────────────────────────
     // After direction confirmation, instead of placing the order immediately,
     // we arm the pullback tracker. It waits for a micro-move then a retrace,
@@ -231,7 +238,8 @@ async fn main() -> Result<()> {
     let pullback_settings = PullbackSettings {
         min_move_bps: settings.strategy.pullback_min_move_bps,
         retrace_pct: settings.strategy.pullback_retrace_pct,
-        max_wait_ms: settings.strategy.max_wait_pullback_s as i64 * 1000,
+        wait_move_ms: settings.strategy.pullback_wait_move_s as i64 * 1000,
+        wait_retrace_ms: settings.strategy.pullback_wait_retrace_s as i64 * 1000,
         ofi_confirm_threshold: settings.strategy.pullback_ofi_confirm,
     };
     let mut pullback_tracker = PullbackTracker::new();
@@ -601,6 +609,23 @@ async fn main() -> Result<()> {
                                         }
                                         // Reset counter after direction confirmed
                                         *count = 0;
+
+                                        // ── Per-coin signal quota check ───────────────────────
+                                        // Prune timestamps older than 10min, then check quota.
+                                        let ts_queue = coin_signal_timestamps
+                                            .entry(coin.clone())
+                                            .or_insert_with(std::collections::VecDeque::new);
+                                        while ts_queue.front().map_or(false, |&t| now_ms - t > signal_quota_window_ms) {
+                                            ts_queue.pop_front();
+                                        }
+                                        if ts_queue.len() as u32 >= max_signals_per_coin_10min {
+                                            debug!(
+                                                "[MAIN] {} signal quota reached ({}/{} in 10min) — skip",
+                                                coin, ts_queue.len(), max_signals_per_coin_10min
+                                            );
+                                            continue;
+                                        }
+                                        ts_queue.push_back(now_ms);
 
                                         // Record signal for observability (before pullback arm)
                                         let (sig_coin, sig_dir, sig_price, sig_sl, sig_tp) = if let Intent::PlacePassiveEntry {

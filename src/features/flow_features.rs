@@ -7,17 +7,22 @@ use crate::market_data::book_manager::TapeEntry;
 /// Temporal features computed over rolling windows from the trade tape.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlowFeatures {
-    // OFI — multiple windows
+    // OFI — kept for compatibility / observability but no longer used in dir_score
     pub ofi_1s: f64,
     pub ofi_3s: f64,
     pub ofi_10s: f64,
     pub ofi_30s: f64,
 
+    // Price momentum — primary directional signal (empirically: corr ~0.35 vs 0.06 for OFI)
+    pub price_return_5s: f64,   // (price_now - price_5s_ago) / price_5s_ago × 10_000 (bps)
+    pub price_return_10s: f64,  // same over 10s
+    pub price_return_30s: f64,  // used for trending regime filter
+
     // Trade aggression
     pub trade_intensity: f64,       // trades/sec over 10s window
     pub avg_trade_size: f64,
     pub large_trade_ratio: f64,     // % trades > 2× avg size
-    pub aggression_persistence: f64, // signed: buy dominance (+) vs sell dominance (-), range [-1, +1]
+    pub aggression_persistence: f64, // signed: buy dominance (+) vs sell dominance (-)
 
     // Realized volatility
     pub realized_vol_3s: f64,
@@ -26,8 +31,8 @@ pub struct FlowFeatures {
     pub vol_ratio: f64,             // realized_vol_3s / realized_vol_30s
 
     // Toxicity proxy
-    pub fill_toxicity_5s: f64,     // Delayed: available at T+5s
-    pub toxicity_proxy_instant: f64, // Proportion of trades that consumed best level
+    pub fill_toxicity_5s: f64,
+    pub toxicity_proxy_instant: f64,
 
     // Refill speed
     pub refill_speed: f64,
@@ -36,7 +41,7 @@ pub struct FlowFeatures {
     pub cancel_add_ratio: f64,
 
     // Maturity indicators
-    pub trade_count_10s: usize,     // Number of trades in 10s window
+    pub trade_count_10s: usize,
 }
 
 impl FlowFeatures {
@@ -92,6 +97,13 @@ pub fn compute_flow_features(tape: &VecDeque<TapeEntry>, now_ms: i64, cancel_add
         let total = last_n.len() as f64;
         features.aggression_persistence = (2.0 * buy_count - total) / total;
     }
+
+    // ── Price momentum — primary directional signal ──
+    // Computed from last traded price vs price N seconds ago in the tape.
+    // Empirically: corr(pr5s, ret30s) = +0.354 vs corr(ofi_10s, ret30s) = +0.058.
+    features.price_return_5s = compute_price_return(tape, now_ms, 5_000);
+    features.price_return_10s = compute_price_return(tape, now_ms, 10_000);
+    features.price_return_30s = compute_price_return(tape, now_ms, 30_000);
 
     // ── Realized volatility ──
     features.realized_vol_3s = compute_realized_vol(tape, now_ms, 3_000);
@@ -191,4 +203,23 @@ fn compute_realized_vol(tape: &VecDeque<TapeEntry>, now_ms: i64, window_ms: i64)
     let mean = returns.iter().sum::<f64>() / returns.len() as f64;
     let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
     variance.sqrt()
+}
+
+/// Price return in bps over a time window: (last_price - first_price) / first_price × 10_000.
+/// Returns 0.0 if fewer than 2 trades are in the window.
+fn compute_price_return(tape: &VecDeque<TapeEntry>, now_ms: i64, window_ms: i64) -> f64 {
+    let window: Vec<&TapeEntry> = tape
+        .iter()
+        .rev()
+        .filter(|t| now_ms - t.timestamp <= window_ms)
+        .collect();
+    if window.len() < 2 {
+        return 0.0;
+    }
+    let last_price = window[0].price;                    // most recent
+    let first_price = window[window.len() - 1].price;   // oldest in window
+    if first_price <= 0.0 {
+        return 0.0;
+    }
+    (last_price - first_price) / first_price * 10_000.0
 }

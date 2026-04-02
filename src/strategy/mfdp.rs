@@ -38,7 +38,8 @@ impl MfdpStrategy {
             | Regime::ActiveToxic
             | Regime::NewslikeChaos
             | Regime::WideSpread
-            | Regime::LowSignal => return (Intent::NoTrade, 0.0, 0.0),
+            | Regime::LowSignal
+            | Regime::RangingMarket => return (Intent::NoTrade, 0.0, 0.0),
             _ => {}
         }
 
@@ -101,16 +102,15 @@ impl MfdpStrategy {
         );
 
         debug!(
-            "[MFDP] {} features: ofi_10s={:.3} micro_bps={:.2} vamp_bps={:.2} agg={:.2} depth_r={:.2} tox={:.2} spread={:.1}bps imb5={:.2} vol_r={:.2} intensity={:.1}",
+            "[MFDP] {} features: pr5s={:.2}bps pr10s={:.2}bps micro={:.2} vamp={:.2} depth_imb={:.2} tox={:.2} spread={:.1}bps vol_r={:.2} intensity={:.1}",
             coin,
-            features.flow.ofi_10s,
+            features.flow.price_return_5s,
+            features.flow.price_return_10s,
             features.book.micro_price_vs_mid_bps,
             features.book.vamp_signal_bps,
-            features.flow.aggression_persistence,
-            features.book.depth_ratio,
+            features.book.imbalance_weighted,
             features.flow.toxicity_proxy_instant,
             features.book.spread_bps,
-            features.book.imbalance_top5,
             features.flow.vol_ratio,
             features.flow.trade_intensity,
         );
@@ -123,7 +123,7 @@ impl MfdpStrategy {
             stop_loss,
             take_profit,
             size: Decimal::ZERO,
-            max_wait_s: self.settings.max_wait_pullback_s,
+            max_wait_s: self.settings.pullback_wait_retrace_s,
         }, direction_score, queue_score)
     }
 
@@ -149,27 +149,38 @@ impl MfdpStrategy {
     }
 
     /// Compute the directional score from features (range roughly −1 to +1).
+    ///
+    /// Primary signal: price momentum (pr5s/pr10s), corr=+0.354 with ret30s.
+    /// Secondary: book microstructure (micro_price, vamp, depth_imb).
+    /// Penalty: toxicity.
     fn compute_direction_score(&self, features: &CoinFeatures) -> f64 {
         let s = &self.settings;
 
-        let ofi_norm = features.flow.ofi_10s.clamp(-1.0, 1.0);
+        // Price momentum: normalize so 5bps = full signal for pr5s, 10bps for pr10s
+        let pr5s_norm = {
+            let v = features.flow.price_return_5s;
+            v.signum() * (v.abs() / 5.0).min(1.0)
+        };
+        let pr10s_norm = {
+            let v = features.flow.price_return_10s;
+            v.signum() * (v.abs() / 10.0).min(1.0)
+        };
+
+        // Book microstructure
         let micro_norm = (features.book.micro_price_vs_mid_bps / 5.0).clamp(-1.0, 1.0);
         let vamp_norm = (features.book.vamp_signal_bps / 5.0).clamp(-1.0, 1.0);
 
-        // Aggression persistence is now signed: +1 = all buys, -1 = all sells
-        let agg_signed = features.flow.aggression_persistence.clamp(-1.0, 1.0);
-
-        // Depth ratio: > 1 = more bid depth = bullish
-        let depth_signed = (features.book.depth_ratio - 1.0).clamp(-1.0, 1.0);
+        // Depth imbalance: imbalance_weighted is already signed [-1, +1]
+        let depth_imb = features.book.imbalance_weighted.clamp(-1.0, 1.0);
 
         // Toxicity penalty (always negative contribution)
         let toxicity_penalty = features.flow.toxicity_proxy_instant;
 
-        s.w_ofi * ofi_norm
+        s.w_pr5s * pr5s_norm
+            + s.w_pr10s * pr10s_norm
             + s.w_micro_price * micro_norm
             + s.w_vamp * vamp_norm
-            + s.w_aggression * agg_signed
-            + s.w_depth_ratio * depth_signed
+            + s.w_depth_imb * depth_imb
             - s.w_toxicity * toxicity_penalty
     }
 
