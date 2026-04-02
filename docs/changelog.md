@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-04-02 — P0 bug fix + config tuning post dry-run analysis
+
+Analysis of the 2026-04-01/02 dry-run session (28 trades, WR=39%, P&L=-$90.38) revealed a critical bug and several config issues. The bot was stuck in DoNotTrade for 16h+ after a WS reconnect.
+
+### P0 — BUG: DoNotTrade permanent after WebSocket reconnect (critical)
+
+### Risk state persistence across restarts
+- **Problem**: After restart, `peak_equity`, `daily_start_balance`, `daily_reset_ts` and `kill_switch` were reset. A -8% drawdown before restart + -8% after = -16% real but undetected by circuit breaker.
+- **Fix**: `RiskManager::new_with_persistence()` saves/loads state from `data/risk_state.json`.
+  - State saved every 5 minutes (summary cycle) + on graceful shutdown (SIGINT/ctrl-c) + on event channel close.
+  - On startup: loaded if < 24h old, otherwise starts fresh.
+  - Persisted fields: `peak_equity`, `daily_start_balance`, `daily_reset_ts`, `kill_switch_active`.
+  - **Live priority**: exchange data is always authoritative. `peak_equity = max(exchange_equity, persisted_peak)` — never artificially lowered. `daily_start_balance`/`daily_reset_ts`/`kill_switch` come from persistence only (not available from exchange).
+  - `check_daily_reset()` runs immediately at startup — if bot restarts after midnight UTC, daily counters reset on actual exchange equity.
+- **Graceful shutdown**: Added `tokio::signal::ctrl_c()` handler in the main select loop.
+- **Files**: `src/risk/manager.rs`, `src/main.rs`
+
+### P0 — BUG: DoNotTrade permanent after WebSocket reconnect (critical)
+- **Symptom**: After a WS reconnect at 19:49 UTC, all 12 coins switched to `DoNotTrade` and never recovered. 0 signals for 16h+.
+- **Root cause**: On `Reconnected`, `book_stale` was set to `true` for all coins, but `OrderBook::snapshot_loaded` was NOT reset. The next l2Book messages were treated as deltas (not snapshots), and `apply_delta()` never clears `book_stale`. So `is_stale()` returned `true` forever → regime always `DoNotTrade`.
+- **Fix**: Reset `snapshot_loaded = false` for all books on `Reconnected`, so the next l2Book is treated as a fresh snapshot which properly clears `book_stale`.
+- **File**: `src/market_data/book_manager.rs`
+
+### P1 — SL/TP tuning (SL floor too tight, TP unreachable)
+- SL was hardcoded at 15 bps floor in practice (vol 30s always below floor). TP at 30 bps never hit in 5 min max_hold. Winners came from timeout, not TP.
+- `sl_vol_multiplier`: 2.5 → **4.0** (scale better with real vol)
+- `sl_min_bps`: 15.0 → **8.0** (let vol multiplier operate)
+- `target_rr`: 2.0 → **1.5** (achievable TP within hold time)
+- `max_hold_s`: 300 → **600** (10 min — more time for TP to realize)
+- **File**: `config/default.toml`
+
+### P2 — ETH over-representation (53% of signals)
+- 75/143 signals were ETH Long. 16 ETH trades in 2h46 due to short cooldowns.
+- `signal_cooldown_ms`: 30s → **60s** (`src/main.rs`)
+- `cooldown_after_close_s`: 60 → **120** (`config/default.toml`)
+
+### P3 — Entry quality filters too loose
+- Most signals had dir_score barely above 0.50 (noise entries). NEAR SL_HIT in 11s, 7 consecutive SL_HIT streak.
+- `direction_threshold_long`: 0.5 → **0.52**
+- `direction_threshold_short`: -0.5 → **-0.52**
+- `queue_score_threshold`: 0.3 → **0.5** (observed min was 0.52)
+- **File**: `config/default.toml`
+
+### P4 — WS reconnect frequency
+- 6 reconnects in 17h. `ws_stale_s=60` too aggressive (normal network delay > 60s triggers reconnect).
+- `ws_stale_s`: 60 → **120**
+- **File**: `config/default.toml`
+
 ## 2026-04-01 — Fix force exit spam bug
 
 ### Bug: ForceExitIoc fired every tick after max_hold timeout

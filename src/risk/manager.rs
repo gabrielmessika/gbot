@@ -1,10 +1,23 @@
+use std::path::{Path, PathBuf};
+
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::config::settings::RiskSettings;
 use crate::execution::position_manager::PositionManager;
 use crate::features::engine::CoinFeatures;
 use crate::strategy::signal::Intent;
+
+/// Persisted subset of risk state — survives restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RiskSnapshot {
+    peak_equity: Decimal,
+    daily_start_balance: Decimal,
+    daily_reset_ts: i64,
+    kill_switch_active: bool,
+    saved_at: i64,
+}
 
 /// Risk manager — has absolute veto power over the strategy.
 pub struct RiskManager {
@@ -15,6 +28,7 @@ pub struct RiskManager {
     kill_switch_active: bool,
     error_count_5m: u32,
     last_error_ts: i64,
+    state_path: Option<PathBuf>,
 }
 
 impl RiskManager {
@@ -27,6 +41,80 @@ impl RiskManager {
             kill_switch_active: false,
             error_count_5m: 0,
             last_error_ts: 0,
+            state_path: None,
+        }
+    }
+
+    /// Create a RiskManager and attempt to restore persisted state from `data_dir/risk_state.json`.
+    ///
+    /// **Priority**: `initial_equity` (from the exchange in live, or simulated) is the source of
+    /// truth. Persisted state only fills in fields that the exchange cannot provide
+    /// (`daily_start_balance`, `daily_reset_ts`, `kill_switch`).
+    /// `peak_equity` = max(exchange equity, persisted peak) to avoid artificially lowering it.
+    ///
+    /// Falls back to fresh state if the file is missing, corrupt, or stale (> 24h old).
+    pub fn new_with_persistence(settings: RiskSettings, initial_equity: Decimal, data_dir: &str) -> Self {
+        let state_path = Path::new(data_dir).join("risk_state.json");
+        let mut mgr = Self::new(settings, initial_equity);
+        mgr.state_path = Some(state_path.clone());
+
+        if let Ok(contents) = std::fs::read_to_string(&state_path) {
+            match serde_json::from_str::<RiskSnapshot>(&contents) {
+                Ok(snap) => {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    let age_h = (now - snap.saved_at) as f64 / 3_600_000.0;
+
+                    if age_h > 24.0 {
+                        info!("[RISK] Persisted state too old ({:.1}h) — starting fresh", age_h);
+                    } else {
+                        // peak_equity: never lower it below the real exchange equity
+                        mgr.peak_equity = snap.peak_equity.max(initial_equity);
+                        // daily tracking: only from persistence (exchange doesn't provide this)
+                        mgr.daily_start_balance = snap.daily_start_balance;
+                        mgr.daily_reset_ts = snap.daily_reset_ts;
+                        mgr.kill_switch_active = snap.kill_switch_active;
+
+                        info!(
+                            "[RISK] Restored risk state (age={:.1}h): peak={} (exchange={}) daily_start={} kill_switch={}",
+                            age_h, mgr.peak_equity, initial_equity, snap.daily_start_balance, snap.kill_switch_active
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("[RISK] Failed to parse risk_state.json: {} — starting fresh", e);
+                }
+            }
+        } else {
+            info!("[RISK] No persisted risk state found — starting fresh");
+        }
+
+        // Run daily reset check immediately (in case bot restarted after midnight)
+        mgr.check_daily_reset(initial_equity);
+
+        mgr
+    }
+
+    /// Persist current risk state to disk. Called periodically and on shutdown.
+    pub fn save_state(&self) {
+        let Some(ref path) = self.state_path else { return };
+
+        let snap = RiskSnapshot {
+            peak_equity: self.peak_equity,
+            daily_start_balance: self.daily_start_balance,
+            daily_reset_ts: self.daily_reset_ts,
+            kill_switch_active: self.kill_switch_active,
+            saved_at: chrono::Utc::now().timestamp_millis(),
+        };
+
+        match serde_json::to_string_pretty(&snap) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(path, json) {
+                    warn!("[RISK] Failed to save risk state: {}", e);
+                }
+            }
+            Err(e) => {
+                warn!("[RISK] Failed to serialize risk state: {}", e);
+            }
         }
     }
 

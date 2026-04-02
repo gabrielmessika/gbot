@@ -80,6 +80,11 @@ impl BookManager {
                 for mut entry in self.book_stale.iter_mut() {
                     *entry.value_mut() = true;
                 }
+                // Reset snapshot_loaded so next l2Book is treated as a fresh snapshot
+                // (fixes DoNotTrade-forever after reconnect)
+                for mut book in self.books.iter_mut() {
+                    book.snapshot_loaded = false;
+                }
             }
             WsEvent::SnapshotLoaded { coin } => {
                 self.book_stale.insert(coin.clone(), false);

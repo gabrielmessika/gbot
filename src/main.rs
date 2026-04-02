@@ -144,7 +144,11 @@ async fn main() -> Result<()> {
     let signal_recorder = SignalRecorder::new(&settings.general.data_dir)?;
     let metrics = Arc::new(Metrics::new());
     let strategy = MfdpStrategy::new(settings.strategy.clone());
-    let mut risk_mgr = RiskManager::new(settings.risk.clone(), initial_equity);
+    let mut risk_mgr = RiskManager::new_with_persistence(
+        settings.risk.clone(),
+        initial_equity,
+        &settings.general.data_dir,
+    );
     let mut order_mgr = OrderManager::new(settings.general.mode.clone(), settings.execution.clone());
     let mut position_mgr = PositionManager::new(settings.execution.clone());
     let mut portfolio = PortfolioState::new(initial_equity);
@@ -211,7 +215,7 @@ async fn main() -> Result<()> {
 
     // ── Per-coin signal cooldown (prevents re-emitting same signal every tick) ──
     let mut signal_cooldowns: HashMap<String, i64> = HashMap::new();
-    let signal_cooldown_ms: i64 = 30_000; // 30s cooldown per coin after signal
+    let signal_cooldown_ms: i64 = 60_000; // 60s cooldown per coin after signal
 
     // ── Direction confirmation tracking ──
     // Require min_direction_confirmations consecutive evaluations with score above threshold
@@ -249,6 +253,10 @@ async fn main() -> Result<()> {
     let mut regimes: HashMap<String, regime_engine::Regime> = HashMap::new();
     let mut event_feed = EventFeed::new(30);
     let mut dashboard_tick = tokio::time::interval(Duration::from_millis(500));
+
+    // ── Graceful shutdown signal ──
+    let shutdown_signal = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown_signal);
 
     // ── Trade history + bot status tracking ──
     let started_at_ms = chrono::Utc::now().timestamp_millis();
@@ -1113,6 +1121,9 @@ async fn main() -> Result<()> {
                     rejections_since_summary = 0;
                     fills_since_summary = 0;
                     last_summary_ms = now_ms;
+
+                    // Persist risk state every summary cycle
+                    risk_mgr.save_state();
                 }
 
                 // ── Metrics snapshot ──
@@ -1275,8 +1286,16 @@ async fn main() -> Result<()> {
                 *dashboard_snapshot.write().await = snap;
             }
 
+            _ = &mut shutdown_signal => {
+                info!("[MAIN] Shutdown signal received — saving risk state...");
+                risk_mgr.save_state();
+                info!("[MAIN] Risk state saved. Exiting.");
+                break;
+            }
+
             else => {
                 error!("[MAIN] Event channel closed — shutting down");
+                risk_mgr.save_state();
                 break;
             }
         }

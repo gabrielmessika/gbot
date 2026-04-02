@@ -22,7 +22,7 @@ order_weight = 1
 connect_ms = 10000
 read_ms = 30000
 ws_heartbeat_s = 30
-ws_stale_s = 60
+ws_stale_s = 120
 
 [exchange.reconnect]
 initial_delay_ms = 1000
@@ -89,8 +89,8 @@ w_depth_ratio = 0.10
 w_toxicity = 0.10
 
 # Thresholds
-direction_threshold_long = 0.5
-direction_threshold_short = -0.5
+direction_threshold_long = 0.52
+direction_threshold_short = -0.52
 
 # Pullback entry timing (Phase 7.5)
 pullback_retrace_pct = 0.35     # Enter after 35% retrace of the micro-move
@@ -104,13 +104,13 @@ queue_w_imbalance = 0.25
 queue_w_toxicity = 0.20
 queue_w_depth = 0.15
 queue_w_vol = 0.15
-queue_score_threshold = 0.3
+queue_score_threshold = 0.5
 
 # Dynamic SL/TP — SL = max(sl_min_bps, sl_vol_multiplier × realized_vol_30s), capped at sl_max_bps
-sl_vol_multiplier = 2.5   # SL = 2.5× realized 30s volatility
-sl_min_bps = 15.0         # Minimum SL distance (15 bps floor)
+sl_vol_multiplier = 4.0   # SL = 4× realized 30s volatility
+sl_min_bps = 8.0          # Minimum SL distance (8 bps floor)
 sl_max_bps = 80.0         # Maximum SL distance (80 bps cap)
-target_rr = 2.0           # TP = SL × target_rr
+target_rr = 1.5           # TP = SL × target_rr
 
 # Direction confirmation — require N consecutive evaluations with score above threshold
 min_direction_confirmations = 3
@@ -127,7 +127,7 @@ max_daily_loss_pct = 10.0
 drawdown_throttle_start_pct = 7.0
 drawdown_throttle_severe_pct = 12.0
 drawdown_circuit_breaker_pct = 20.0
-cooldown_after_close_s = 60
+cooldown_after_close_s = 120
 max_slippage_pct = 0.5
 min_spread_bps = 0.0
 max_spread_bps = 10.0
@@ -142,7 +142,7 @@ max_leverage = 20
 default_leverage = 10
 
 [execution]
-max_hold_s = 300          # 5 minutes
+max_hold_s = 600          # 10 minutes
 max_mae_bps = 15.0        # max adverse excursion
 order_timeout_s = 60
 fill_poll_interval_s = 5
