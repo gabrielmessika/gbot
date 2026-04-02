@@ -877,10 +877,15 @@ async fn main() -> Result<()> {
                                                     closed_trades.push(tv);
                                                 }
 
-                                                // Record closing fee
+                                                // Record closing fee: SL = taker (0.045%), TP/other = maker (0.015%)
                                                 let notional = closed.fill_price * closed.size;
+                                                let exit_fee_rate = if closed.reason.contains("SL") {
+                                                    0.00045_f64 // taker — SL triggers are market orders
+                                                } else {
+                                                    0.00015_f64 // maker
+                                                };
                                                 let fee = notional
-                                                    * Decimal::try_from(0.00015_f64).unwrap_or_default();
+                                                    * Decimal::try_from(exit_fee_rate).unwrap_or_default();
                                                 portfolio.record_fee(fee);
                                                 metrics.open_positions.set(position_mgr.count() as i64);
 
@@ -1060,7 +1065,16 @@ async fn main() -> Result<()> {
                             let entry_f = pos.entry_price.to_string().parse::<f64>().unwrap_or(0.0);
                             let exit_f = exit_price.to_string().parse::<f64>().unwrap_or(0.0);
                             let size_f = pos.size.to_string().parse::<f64>().unwrap_or(0.0);
-                            let (pnl_pct, pnl_usd) = if entry_f > 0.0 {
+                            let notional_f = entry_f * size_f;
+
+                            // Exit fee: SL = taker (0.045%), TP/other = maker (0.015%)
+                            // Entry fee (maker 0.015%) already recorded at fill time
+                            let exit_fee_rate = if reason.contains("SL") { 0.00045 } else { 0.00015 };
+                            let exit_fee = notional_f * exit_fee_rate;
+                            let entry_fee = notional_f * 0.00015; // for display only
+
+                            // Gross P&L (same as live path — portfolio handles fees separately)
+                            let (_pnl_pct, pnl_usd) = if entry_f > 0.0 {
                                 let diff = match pos.direction {
                                     gbot::strategy::signal::Direction::Long => exit_f - entry_f,
                                     gbot::strategy::signal::Direction::Short => entry_f - exit_f,
@@ -1069,10 +1083,11 @@ async fn main() -> Result<()> {
                             } else {
                                 (0.0, 0.0)
                             };
+                            let net_pnl = pnl_usd - entry_fee - exit_fee;
 
                             info!(
-                                "[DRYFILL] {} closed: {} @ {} | P&L: ${:.2} ({:.2}%)",
-                                coin, reason, exit_price, pnl_usd, pnl_pct
+                                "[DRYFILL] {} closed: {} @ {} | P&L: ${:.2} net=${:.2} fees=${:.2}",
+                                coin, reason, exit_price, pnl_usd, net_pnl, entry_fee + exit_fee
                             );
 
                             // Journal: position closed
@@ -1082,7 +1097,7 @@ async fn main() -> Result<()> {
                                 direction: format!("{:?}", pos.direction),
                                 entry_price: pos.entry_price.to_string(),
                                 exit_price: exit_price.to_string(),
-                                pnl: format!("{:.2}", pnl_usd),
+                                pnl: format!("{:.2}", net_pnl),
                                 reason: reason.clone(),
                             });
 
@@ -1091,8 +1106,8 @@ async fn main() -> Result<()> {
                                 direction: format!("{:?}", pos.direction),
                                 entry_price: entry_f,
                                 exit_price: exit_f,
-                                pnl_usd,
-                                pnl_pct,
+                                pnl_usd: net_pnl,
+                                pnl_pct: if notional_f > 0.0 { net_pnl / notional_f * 100.0 } else { 0.0 },
                                 close_reason: reason.clone(),
                                 opened_at: pos.opened_at,
                                 closed_at: now_ms,
@@ -1100,14 +1115,18 @@ async fn main() -> Result<()> {
                                 break_even_applied: pos.break_even_applied,
                             };
 
+                            // Portfolio: gross P&L + exit fee only (entry fee already recorded)
+                            portfolio.record_pnl(Decimal::try_from(pnl_usd).unwrap_or_default());
+                            portfolio.record_fee(
+                                Decimal::try_from(exit_fee).unwrap_or_default()
+                            );
                             position_mgr.close_position(&coin, &reason, exit_price, cooldown_s);
                             order_mgr.set_flat(&coin);
-                            portfolio.record_pnl(Decimal::try_from(pnl_usd).unwrap_or_default());
                             closed_trades.push(trade_view);
                             metrics.open_positions.set(position_mgr.count() as i64);
 
-                            // Update simulated equity in dry-run
-                            current_equity += Decimal::try_from(pnl_usd).unwrap_or_default();
+                            // Update simulated equity with net P&L (gross - all fees)
+                            current_equity += Decimal::try_from(net_pnl).unwrap_or_default();
                             risk_mgr.update_equity(current_equity);
 
                             event_feed.push("fill", format!(

@@ -99,6 +99,14 @@ pub fn classify(
         return Regime::WideSpread;
     }
 
+    // ── RangingMarket: price flat over 30s → no directional momentum ──
+    // MUST be checked BEFORE tradable regimes (QuietTight, ActiveHealthy).
+    // Empirically: directional_acc=0% in flat market (|pr30s| < trending_min_bps).
+    // Bug fix: was placed after QuietTight → never triggered (QuietTight matched first).
+    if features.flow.price_return_30s.abs() < settings.trending_min_bps {
+        return Regime::RangingMarket;
+    }
+
     // ── QuietTight ──
     if features.book.spread_bps <= settings.quiet_tight_max_spread_bps
         && features.flow.toxicity_proxy_instant <= settings.quiet_tight_max_toxicity
@@ -129,12 +137,6 @@ pub fn classify(
     // ── LowSignal (catch-all for quiet markets with insufficient conditions) ──
     if features.flow.trade_intensity < 1.0 {
         return Regime::LowSignal;
-    }
-
-    // ── RangingMarket: price flat over 30s → no directional momentum ──
-    // Empirically: directional_acc=0% in flat market (|pr30s| < trending_min_bps).
-    if features.flow.price_return_30s.abs() < settings.trending_min_bps {
-        return Regime::RangingMarket;
     }
 
     // Default: ActiveHealthy if nothing else matched

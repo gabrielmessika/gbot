@@ -1,7 +1,7 @@
 # gbot — Plan d'évolution MFDP V2
 
-> **Statut** : **Phases 1, 2, 3 et 4.1 IMPLÉMENTÉES** (2026-04-02). Build propre. Prêt pour dry-run de validation.
-> Ce plan documente les évolutions prioritaires issues de l'analyse empirique sur données L2 réelles (2026-04-01/02, 20h, 12 coins).
+> **Statut** : **V2.1 IMPLÉMENTÉ** (2026-04-02 soir). Phases 1-3 + fix RangingMarket + calibration SL/TP + trailing.
+> Build propre. Prêt pour dry-run de validation (objectif : +50%/+100% sur 10 jours).
 >
 > **Règle** : toute évolution doit avoir un résultat attendu chiffré et être validée en dry-run
 > sur ≥ 4h avant passage en live.
@@ -110,9 +110,10 @@ w_vamp = 0.15   w_depth_imb = 0.15   w_toxicity = 0.10
 
 Implémenté : `Regime::RangingMarket` — `allows_entry() = false`.
 Condition : `|price_return_30s| < trending_min_bps` (défaut : 3.0 bps).
-Placement dans la cascade : après LowSignal, avant le fallback ActiveHealthy.
+~~Placement initial : après LowSignal.~~ **Bug V2.0** : ne se déclenchait jamais (QuietTight matchait d'abord).
+**Fix V2.1** : déplacé **avant** QuietTight/QuietThin/ActiveHealthy, juste après WideSpread.
 
-**Résultat attendu** : élimination des trades en régime ranging (WR=0% mesuré). *À mesurer en dry-run.*
+**Résultat V2.0** : 0 déclenchements en 4.4h. **Résultat attendu V2.1** : élimine ~60% des trades en marché plat.
 
 ---
 
@@ -218,30 +219,40 @@ Règle simple : funding > +0.08%/8h → biais short uniquement (longs surreprés
 
 ## Résultats attendus globaux
 
-### Après Phases 1-3 (baseline actuelle → V2)
+### Résultats mesurés V2.0 (4.4h dry-run, 2026-04-02)
 
-| Métrique | Session 1 (V1 old) | Session 2 (V1 new) | V2 cible |
-|----------|-------------------|-------------------|----------|
-| Win Rate | 39% | 0% | **55-65%** |
-| P&L/trade | −$3.23 | −$3.12 | **+$2 à +$5** |
-| Trades/heure | 3.9 | 2.3 | 2-5 |
-| Concentration ETH | 57% | 77% | <35% |
-| Trades en régime ranging | non mesuré | ~100% | **<20%** |
+| Métrique | V1 Sess.1 | V1 Sess.2 | **V2.0 mesuré** | V2.1 cible |
+|----------|-----------|-----------|----------------|------------|
+| Win Rate | 39% | 0% | **46.5%** | **55%+** |
+| P&L/trade | −$3.23 | −$3.12 | **−$0.48** | **+$0.50+** |
+| Trades/heure | 3.9 | 2.3 | **39.2** | 10-20 |
+| Concentration ETH | 57% | 77% | **18%** ✅ | <35% |
+| Pullback completion | — | 10% | **36%** ✅ | 40%+ |
+| TP hits | — | 0 | **11** | 20%+ des trades |
+| max_hold % | — | — | **70%** | <30% |
+| RangingMarket filtré | — | — | **0 (bug)** | visible |
 
-**Hypothèses sous-jacentes :**
-- Signal momentum pr5s → WR 55-65% en marché trending (mesuré empiriquement : 68% sur session baissière continue)
-- Filtre trending réduit le volume de trades de 40-60% mais élimine les trades WR~0%
-- Horizon 45s aligne le hold avec la durée du signal (autocorr > 0.10)
-- Diversification coins réduit la drawdown par corrélation trop forte
+**Diagnostic V2.0** :
+- Q1 (36 premières minutes, marché trending) : 43 trades, 10 TP, WR=60%, P&L=+$75
+- Q2-Q4 (marché flat) : 129 trades, 1 TP, WR=42%, P&L=−$157
+- RangingMarket jamais déclenché (bug placement) → bot trade en flat
+- SL=12bps/TP=18bps inatteignables (mouvement moyen 4.6bps/46s) → 70% max_hold
 
-**Avertissement** : les 68% WR simulés sont sur un seul régime de marché (trend baissier). Un test sur marché mixte (trending + ranging + volatile) est indispensable avant de conclure. Le filtre ranging pourrait réduire le WR à 55-60% en pratique si le signal est moins propre sur un trend haussier.
+**Corrections V2.1** :
+- R1: Fix RangingMarket → élimine ~60% des trades flat
+- R2: SL=5/TP=10bps → atteignable dans l'envelope de mouvement
+- R3: Threshold 0.52→0.60 → filtre signaux tièdes
+- R4: Trailing tiers abaissés → capture gains intermédiaires
+
+**Objectif 10 jours** : +$500/jour (+50%) à +$1000/jour (+100%) sur $10k.
+Nécessite P&L/trade ≥ +$0.53 à ~938 trades/jour (réduit à ~300-400 avec R1+R3).
 
 ---
 
 ## Ordre d'implémentation
 
 ```
-SEMAINE 1 ✅ TERMINÉ (2026-04-02)
+V2.0 ✅ (2026-04-02 après-midi)
 ├── ✅ [P1.1] FlowFeatures: price_return_5s, 10s, 30s
 ├── ✅ [P1.2] MfdpStrategy: refactorer dir_score (OFI → momentum)
 ├── ✅ [P1.3] RegimeEngine: ajouter RangingMarket
@@ -250,9 +261,15 @@ SEMAINE 1 ✅ TERMINÉ (2026-04-02)
 ├── ✅ [P2.3] pullback_min_move_bps: 3.0 → 1.5
 ├── ✅ [P3.1] Per-coin signal quota (fenêtre 10min)
 ├── ✅ [P4.1] Script research/scripts/analyze_obi_levels.py
-└── [TEST] ⏳ Dry-run 8h — mesurer: diversité coins, pullback
-          completion rate, holds <60s, WR vs baseline,
-          RangingMarket visible dans logs
+└── [TEST] Dry-run 4.4h → WR=46.5%, P&L=-$82, 0 RangingMarket (bug)
+
+V2.1 ✅ (2026-04-02 soir — calibration post dry-run)
+├── ✅ [R1] Fix RangingMarket: déplacé AVANT QuietTight/ActiveHealthy
+├── ✅ [R2] SL=5bps, TP=10bps (RR=2.0), sl_vol_multiplier=3.0
+├── ✅ [R3] direction_threshold: 0.52 → 0.60
+├── ✅ [R4] Trailing: BE trigger 40%, tier1 50%/30%, tier2 70%/50%
+└── [TEST] ⏳ Dry-run 8h — mesurer: RangingMarket actif, max_hold <30%,
+          TP rate >15%, P&L/trade > 0, trades/h ~10-20
 
 PROCHAINE ÉTAPE (~2026-04-05, quand ≥3j de données multi-level)
 ├── [P4.2] Lancer analyze_obi_levels.py sur les données L2
@@ -284,12 +301,12 @@ MOYEN TERME (≥2 semaines de dry-run stable)
 
 ## Fichiers modifiés
 
-### Phase 1 ✅
+### Phase 1 ✅ + fix V2.1
 - `src/features/flow_features.rs` — `price_return_5s/10s/30s` + `compute_price_return()`
 - `src/strategy/mfdp.rs` — `compute_direction_score()` refactoré, gate `RangingMarket`
 - `src/config/settings.rs` — `w_pr5s`, `w_pr10s`, `w_depth_imb`, `trending_min_bps`
-- `src/regime/engine.rs` — `Regime::RangingMarket`, classification `|pr30s| < trending_min_bps`
-- `config/default.toml` — nouveaux poids, `sl_min_bps=12.0`
+- `src/regime/engine.rs` — `Regime::RangingMarket`, **V2.1: déplacé avant régimes tradables** (fix bug)
+- `config/default.toml` — nouveaux poids, **V2.1: sl_min_bps=5.0, target_rr=2.0, thresholds 0.60, trailing agressif**
 
 ### Phase 2 ✅
 - `src/config/settings.rs` — `pullback_wait_move_s`, `pullback_wait_retrace_s` (suppression `max_wait_pullback_s`)
@@ -317,7 +334,8 @@ MOYEN TERME (≥2 semaines de dry-run stable)
 | 2026-04-01 | V1.0 | MFDP V1 opérationnelle. Session 1 : 28 trades, WR 39%, P&L −$90 |
 | 2026-04-02 | V1.1 | Fix WS reconnect (P0), fix DoNotTrade stuck. Session 2 : 5 trades, WR 0%, P&L −$15 |
 | 2026-04-02 | V1.2 | Recorder: ajout bid_levels/ask_levels[10] pour analyse OBI multi-level |
-| 2026-04-02 | V2.0 | **Implémentation complète Phases 1-3 + script OBI** : pivot OFI → momentum (pr5s), RangingMarket regime, max_hold 45s, pullback timeouts indépendants, quota signal par coin. Build propre. |
+| 2026-04-02 | V2.0 | Phases 1-3 + script OBI. Pivot OFI → momentum, RangingMarket, max_hold 45s, pullback timeouts, quota signal. |
+| 2026-04-02 | V2.1 | **Calibration post dry-run (172 trades, WR=46.5%, P&L=-$82)** : fix RangingMarket (placement avant tradables), SL=5/TP=10bps (RR=2.0), thresholds 0.60, trailing agressif. |
 
 ---
 

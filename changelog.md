@@ -1,5 +1,60 @@
 # Changelog
 
+## 2026-04-02 21h — Fix fee accounting dry-run + live exit taker fee
+
+### Dry-run : double/triple-comptage des fees (P&L faussé)
+- **Bug** : à la sortie dry-run, `entry_fee` était déduite du `pnl_usd` (net) ET re-passée dans `portfolio.record_fee(total_fees)`. Comme `portfolio.net_pnl() = realized_pnl - fees`, les fees étaient comptées 3× : 1× à l'entrée, 1× déduite du P&L, 1× dans record_fee à la sortie.
+- **Fix** : aligné sur le chemin live — `record_pnl(gross)` + `record_fee(exit_fee_only)`. L'equity simulée utilise `net_pnl = gross - entry_fee - exit_fee` pour la progression réelle.
+- **Impact** : les P&L dry-run étaient ~0.03% trop pessimistes par trade (entry fee comptée 2× de trop).
+
+### Live : exit fee toujours maker → taker pour SL
+- **Bug** : à la sortie live, le fee rate était hardcodé à 0.015% (maker) quelle que soit la raison de sortie. Les SL sont des trigger orders qui s'exécutent en market (taker = 0.045%).
+- **Fix** : `exit_fee_rate = 0.045%` si `reason.contains("SL")`, `0.015%` sinon.
+- **Impact** : les fees de sortie SL étaient sous-estimées de 3× (0.015% vs 0.045%).
+
+### Fichiers
+- `src/main.rs` — 2 blocs modifiés (sortie live l.882, sortie dry-run l.1065)
+
+---
+
+## 2026-04-02 20h35 — V2.1 : Fix RangingMarket + SL/TP calibration + trailing
+
+**Contexte** : analyse session V2 (4.4h, 172 trades). WR=46.5%, P&L=-$82.
+Cause racine : 0 TP hit après les 36 premières minutes (marché flat, SL/TP inatteignables).
+- 11 TP (+$121) tous dans Q1 (trending) vs 32 SL réels (-$239) répartis uniformément
+- 120/172 trades (70%) finissent en max_hold avec P&L≈$0 (mouvement moyen 4.6bps, TP à 18bps)
+- RangingMarket ne se déclenchait jamais (0 occurrences en 4.4h — bug de placement)
+
+### R1 — Fix bug RangingMarket (`src/regime/engine.rs`)
+- **Bug** : le check `|price_return_30s| < trending_min_bps` était placé APRÈS QuietTight et ActiveHealthy dans `classify()`. Un marché flat avec spread serré = QuietTight avant d'atteindre le check → 0 déclenchements.
+- **Fix** : déplacé le check RangingMarket **AVANT** les régimes tradables (QuietTight, QuietThin, ActiveHealthy), juste après WideSpread. Suppression de l'ancien check en fin de cascade.
+- **Impact attendu** : élimine les trades en marché plat (~60% du volume Q2-Q4).
+
+### R2 — Réduction SL/TP (`config/default.toml`)
+| Param | Avant | Après | Raison |
+|-------|-------|-------|--------|
+| `sl_min_bps` | 12.0 | **5.0** | Mouvement moyen 4.6bps/46s → SL=12 rarement touché |
+| `sl_max_bps` | 80.0 | **30.0** | Cap trop large inutile |
+| `sl_vol_multiplier` | 4.0 | **3.0** | Réduction overshoot |
+| `target_rr` | 1.5 | **2.0** | TP~10bps atteignable. Breakeven WR=33% (était 40%) |
+| `max_mae_bps` | 15.0 | **8.0** | Aligné avec SL plus serré |
+
+### R3 — Thresholds plus exigeants (`config/default.toml`)
+| Param | Avant | Après | Raison |
+|-------|-------|-------|--------|
+| `direction_threshold_long` | 0.52 | **0.60** | Dir score moyen=0.32, signaux tièdes éliminés |
+| `direction_threshold_short` | -0.52 | **-0.60** | Idem |
+
+### R4 — Trailing stop plus agressif (`config/default.toml`)
+| Param | Avant | Après | Raison |
+|-------|-------|-------|--------|
+| `breakeven.trigger_pct` | 50.0 | **40.0** | BE plus tôt avec TP plus proches |
+| `trailing.tier1_progress_pct` | 65.0 | **50.0** | Ancien tier jamais atteint (TP=18bps → 65%=12bps) |
+| `trailing.tier1_lock_pct` | 25.0 | **30.0** | Lock 30% profit à 50% progress |
+| `trailing.tier2_progress_pct` | 80.0 | **70.0** | Accessible avec TP=10bps |
+
+---
+
 ## 2026-04-02 16h02 — Pivot signal + regime filter refactor
 
 ### Pivot signal : OFI → Price Momentum (empiriquement prouvé)
@@ -25,7 +80,7 @@
 #### `src/regime/engine.rs`
 - Ajout du variant `RangingMarket` dans l'enum `Regime`
 - Classification : si `|price_return_30s| < trending_min_bps` → `RangingMarket` (no-entry)
-  - Placement après LowSignal dans la cascade pour que les filtres spread/vol s'appliquent d'abord
+  - ~~Placement initial après LowSignal~~ **Bug V2.0** : ne se déclenchait jamais car QuietTight matchait en premier. Corrigé en V2.1 (déplacé avant les régimes tradables).
 - `allows_entry()` : `RangingMarket` exclu (comme LowSignal)
 - **Justification empirique** : WR directionnel = 0% quand |pr30s| < 3bps (marché plat)
 
