@@ -90,13 +90,13 @@ build_include_filter() {
             echo "+ *" > "$filter_file"
             ;;
         date)
-            info "Filtre : date = $DATE_FILTER"
+            info "Filtre : date = $DATE_FILTER" >&2
             echo "+ */" > "$filter_file"
             echo "+ *${DATE_FILTER}*" >> "$filter_file"
             echo "- *" >> "$filter_file"
             ;;
         days)
-            info "Filtre : $DAYS derniers jours"
+            info "Filtre : $DAYS derniers jours" >&2
             echo "+ */" > "$filter_file"
             for i in $(seq 0 $((DAYS - 1))); do
                 d=$(date -d "-${i} days" +%Y-%m-%d 2>/dev/null || date -v-${i}d +%Y-%m-%d 2>/dev/null)
@@ -105,7 +105,7 @@ build_include_filter() {
             echo "- *" >> "$filter_file"
             ;;
         recent)
-            info "Filtre : dernières 24h"
+            info "Filtre : dernières 24h" >&2
             local today yesterday
             today=$(date +%Y-%m-%d)
             yesterday=$(date -d "-1 day" +%Y-%m-%d 2>/dev/null || date -v-1d +%Y-%m-%d 2>/dev/null)
@@ -135,8 +135,8 @@ fetch_logs() {
     }
 
     local log_size
-    log_size=$(wc -c < "$LOCAL_DIR/logs/"gbot-*.log 2>/dev/null | tail -1)
-    ok "Logs récupérés ($(numfmt --to=iec "$log_size" 2>/dev/null || echo "${log_size} bytes"))"
+    log_size=$(find "$LOCAL_DIR/logs/" -name 'gbot-*.log' -exec wc -c {} + 2>/dev/null | tail -1 | awk '{print $1}')
+    ok "Logs récupérés ($(numfmt --to=iec "${log_size:-0}" 2>/dev/null || echo "${log_size:-0} bytes"))"
 }
 
 # ---- Télécharger les données ----
