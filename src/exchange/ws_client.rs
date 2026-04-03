@@ -76,21 +76,29 @@ impl WsClient {
 
         loop {
             info!("[WS] Connecting to {}", self.settings.ws_url);
+            let connect_start = std::time::Instant::now();
 
             match self.connect_and_listen().await {
                 Ok(_) => {
                     info!("[WS] Connection closed gracefully");
-                    delay_ms = self.settings.reconnect.initial_delay_ms;
                 }
                 Err(e) => {
                     error!("[WS] Connection error: {}", e);
                 }
             }
 
+            // Only reset backoff if the connection lived long enough (>30s).
+            // A short-lived connection (e.g. immediate "Connection reset") is
+            // effectively an error — keep increasing the backoff.
+            let lived_s = connect_start.elapsed().as_secs();
+            if lived_s > 30 {
+                delay_ms = self.settings.reconnect.initial_delay_ms;
+            }
+
             // Notify reconnect
             let _ = self.event_tx.send(WsEvent::Reconnected).await;
 
-            warn!("[WS] Reconnecting in {}ms", delay_ms);
+            warn!("[WS] Reconnecting in {}ms (connection lived {}s)", delay_ms, lived_s);
             sleep(Duration::from_millis(delay_ms)).await;
 
             // Exponential backoff
@@ -105,7 +113,9 @@ impl WsClient {
 
         info!("[WS] Connected. Subscribing to channels...");
 
-        // Subscribe to all channels
+        // Subscribe to channels with pacing (100ms between each) to avoid
+        // Hyperliquid killing the connection on burst subscription spam.
+        // Bug: sending 30+ subscribe messages instantly caused "Connection reset".
         for coin in &self.coins {
             // L2 book
             let sub_book = json!({
@@ -120,6 +130,11 @@ impl WsClient {
                 "subscription": {"type": "trades", "coin": coin}
             });
             write.send(Message::Text(sub_trades.to_string().into())).await?;
+
+            // Pace: 250ms between each coin's subscriptions.
+            // 100ms was not enough — 15 coins still caused "Connection reset".
+            // 3 coins (no pacing) worked fine → threshold is between 6 and 30 messages.
+            sleep(Duration::from_millis(250)).await;
         }
 
         // allMids

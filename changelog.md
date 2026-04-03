@@ -1,16 +1,31 @@
 # Changelog
 
-## 2026-04-03 08h — Fix WS reconnect loop (31 coins → 15 coins)
+## 2026-04-03 08h — Fix WS reconnect loop + backoff bug
 
-**Symptôme** : bot en boucle de reconnexion WS depuis le démarrage (210 erreurs "Connection reset without closing handshake", 420 reconnects en 8 min). 0 trades, tous les coins en DoNotTrade (books stale).
+**Symptôme** : bot en boucle de reconnexion WS (210 erreurs en 8 min avec 31 coins, puis 30 erreurs en 2 min avec 15 coins). 0 trades, tous les coins en DoNotTrade.
 
-**Cause** : 31 coins × 2 subscriptions (l2Book + trades) = 62 WS subscriptions. Hyperliquid coupe la connexion quand trop de subscriptions sont demandées sur un seul WS.
+### Cause 1 : trop de coins → IP rate limit
+31 coins × 2 subs = 62 WS subscriptions → Hyperliquid coupe la connexion → les reconnects rapides déclenchent un ban IP temporaire → même avec 15 coins le ban persiste.
 
-**Fix** : `config/default.toml` — réduit de 31 à **15 coins** (30 WS subs).
-- Retiré : NEAR, OP (faible volume), JUP, PENDLE, W, ONDO (spread trop large)
-- Retiré : tous les xyz dex (TSLA, AAPL, NVDA, SPY, QQQ, EUR, GBP, JPY, GOLD, SILVER) — pas de liquidité suffisante pour du scalp microstructure
-- Ajouté : WIF, PEPE, TIA, SEI, INJ (mid-cap avec volume sur Hyperliquid)
-- Le support xyz reste dans le code (fetch_xyz_meta, asset_index +110000) mais désactivé en config
+**Fix** : `config/default.toml` — réduit de 31 à **15 coins**.
+
+### Cause 2 : backoff jamais appliqué (`src/exchange/ws_client.rs`)
+**Bug** : `connect_and_listen()` retournait `Ok` (fermeture "propre") même quand la connexion durait <1s → le backoff était reset à `initial_delay_ms` à chaque cycle → le bot spammait les reconnects à 1s d'intervalle indéfiniment.
+
+**Fix** : le backoff n'est reset que si la connexion a vécu >30s. Une connexion <30s est traitée comme un échec → le backoff continue de croître (5s, 10s, 20s, 40s, 60s max).
+
+### Cause 3 : burst de subscriptions (`src/exchange/ws_client.rs`)
+**Trouvé après la 2e itération** : le bot envoyait 30+ messages `subscribe` instantanément à la connexion. Hyperliquid coupe le WS après ~700ms quand il reçoit trop de messages en rafale (11 coins reçus sur 15 avant le reset).
+
+**Fix** : ajout de `sleep(100ms)` entre les subscriptions de chaque coin. 15 coins × 100ms = 1.5s de subscription pacing au lieu de 0ms.
+
+### Config reconnect
+| Param | Avant | Après |
+|-------|-------|-------|
+| `initial_delay_ms` | 1000 | **5000** |
+| `max_delay_ms` | 30000 | **60000** |
+
+Avec backoff exponentiel : 5s → 10s → 20s → 40s → 60s. Au lieu de 2.5s × ∞.
 
 ---
 

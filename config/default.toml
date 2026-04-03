@@ -25,26 +25,23 @@ ws_heartbeat_s = 30
 ws_stale_s = 120
 
 [exchange.reconnect]
-initial_delay_ms = 1000
-max_delay_ms = 30000
+initial_delay_ms = 5000     # Start at 5s (was 1s — too aggressive after IP rate limit)
+max_delay_ms = 60000        # Max 60s (was 30s)
 backoff_factor = 2.0
 
 [coins]
 active = [
-  # Tier 1 — très haute liquidité, spreads ultra-serrés
+  # Tier 1
   "BTC", "ETH", "SOL",
-  # Tier 2 — bonne liquidité, microstructure saine
+  # Tier 2
   "AVAX", "LINK", "ARB",
-  # Tier 3 — volume élevé
+  # Tier 3
   "DOGE", "XRP", "SUI",
   # Hyperliquid natif
   "HYPE",
-  # Tier 4 — mid-cap perps (ajout diversification)
-  "WIF", "PEPE", "TIA", "SEI", "INJ",
-  # Note: 15 coins × 2 subs = 30 WS subscriptions — safe limit.
-  # 31 coins caused reconnect loop (Connection reset).
-  # xyz dex (TSLA, AAPL, etc.) disabled until WS subscription limit is confirmed.
-  # NEAR, OP, JUP, PENDLE, W, ONDO removed (low volume / spread too wide).
+  # WIF, PEPE, TIA, SEI, INJ disabled:
+  # 15 coins (30 subs) causes WS reset even with 100ms pacing.
+  # 12 coins (24 subs) was stable in V2.0/V2.1. Testing 10 coins (20 subs).
 ]
 
 [features]
