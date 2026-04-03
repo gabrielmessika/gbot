@@ -121,6 +121,11 @@ impl BookManager {
                     self.book_stale.insert(coin.to_string(), true);
                 }
 
+                // Update mid from book (ensures xyz coins without allMids have a mid price)
+                if let (Some(bid), Some(ask)) = (book.best_bid(), book.best_ask()) {
+                    self.mids.insert(coin.to_string(), (bid + ask) / 2.0);
+                }
+
                 // Update cancel/add delta stats for this coin (fixes gap #7)
                 // "add" = level with size > 0 (new or updated)
                 // "cancel" = level with size == 0 (removed)

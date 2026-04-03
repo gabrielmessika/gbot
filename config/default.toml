@@ -39,6 +39,12 @@ active = [
   "DOGE", "XRP", "SUI",
   # Hyperliquid natif — très actif sur la plateforme
   "HYPE",
+  # Tier 4 — mid-cap perps, diversification
+  "WIF", "PEPE", "TIA", "SEI", "INJ", "JUP", "PENDLE", "W", "ONDO",
+  # xyz dex (HIP-3) — stocks, forex, commodities (asset_index += 110000)
+  "TSLA", "AAPL", "NVDA", "SPY", "QQQ",
+  "EUR", "GBP", "JPY",
+  "GOLD", "SILVER",
 ]
 
 [features]
@@ -80,8 +86,9 @@ funding_boundary_force_exit_s = 30
 max_cancel_add_ratio = 0.9
 
 # Ranging filter: minimum |price_return_30s| in bps for market to be considered trending.
-# Below this → RangingMarket regime (no entries). Empirical: WR=0% in flat market.
-trending_min_bps = 3.0
+# V2.1 data: 3.0 bps let through too many flat-market trades (82 trades, WR=13%).
+# With 6bps round-trip fees, need |pr30s| > fees to have any directional edge.
+trending_min_bps = 5.0
 
 [strategy]
 # Direction score weights — primary: price momentum (corr=+0.354 vs OFI corr=+0.058)
@@ -112,14 +119,16 @@ queue_w_vol = 0.15
 queue_score_threshold = 0.5
 
 # Dynamic SL/TP — SL = max(sl_min_bps, sl_vol_multiplier × realized_vol_30s), capped at sl_max_bps
-# Session V2 data: avg movement in 46s = 4.6 bps. Old SL=12/TP=18 bps unreachable → 70% max_hold.
-sl_vol_multiplier = 3.0   # SL = 3× realized 30s volatility (was 4.0)
-sl_min_bps = 5.0          # SL floor: reachable in ~24s at avg vol (was 12.0)
-sl_max_bps = 30.0         # SL cap reduced (was 80.0)
-target_rr = 2.0           # TP = SL × 2.0 → TP~10bps. Breakeven WR=33% (was 1.5 → needed 40%)
+# RULE: SL must be >= 2× round-trip fees (6bps). sl_min=5 caused 51% SL hit rate (noise).
+# V2.2: SL=8bps (safe from noise + fees), TP=12bps (RR=1.5, breakeven WR=40%).
+sl_vol_multiplier = 3.0   # SL = 3× realized 30s volatility
+sl_min_bps = 8.0          # SL floor: > 2× fees (6bps). Was 5.0 (V2.1, too tight) / 12.0 (V2.0, too far)
+sl_max_bps = 30.0         # SL cap
+target_rr = 1.5           # TP = SL × 1.5 → TP~12bps. Breakeven WR=40%
 
 # Direction confirmation — require N consecutive evaluations with score above threshold
-min_direction_confirmations = 3
+# V2.1: 3 confirmations → 8.2 trades/h. Raise to 5 → target 2-4 trades/h, higher quality.
+min_direction_confirmations = 5
 
 # Feature maturity — minimum trades in 10s window before producing a signal
 min_trades_for_signal = 5
@@ -152,21 +161,20 @@ default_leverage = 10
 
 [execution]
 max_hold_s = 45           # ~45s: momentum autocorrelation decays to ~0 at 60s
-max_mae_bps = 8.0         # max adverse excursion (was 15 — aligned with SL=5bps)
+max_mae_bps = 12.0        # max adverse excursion (aligned with SL=8bps)
 order_timeout_s = 60
 fill_poll_interval_s = 5
 sync_interval_s = 30
 
 [execution.breakeven]
-trigger_pct = 40.0        # TP progress % to trigger BE (was 50 — trigger earlier with smaller TP)
+trigger_pct = 50.0        # TP progress % to trigger BE (50% of 12bps TP = 6bps = covers fees)
 detection_tolerance_pct = 0.2
 
 [execution.trailing]
-# Trailing stop paliers — lowered to match tighter SL/TP (avg move=4.6bps, TP~10bps)
-# Old tiers (65%/80%) were never reached with TP=18bps. New: tier1 at 50%, tier2 at 70%.
-tier1_progress_pct = 50.0   # Lock 30% of profit at 50% TP progress (~5bps on 10bps TP)
+# V2.2: TP~12bps. tier1 at 60% (7.2bps), tier2 at 80% (9.6bps).
+tier1_progress_pct = 60.0   # Lock 30% of profit at 60% TP progress (~7bps on 12bps TP)
 tier1_lock_pct = 30.0
-tier2_progress_pct = 70.0   # Lock 50% of profit at 70% TP progress (~7bps on 10bps TP)
+tier2_progress_pct = 80.0   # Lock 50% of profit at 80% TP progress (~10bps on 12bps TP)
 tier2_lock_pct = 50.0
 
 [recording]

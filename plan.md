@@ -200,7 +200,54 @@ Sur Hyperliquid (peu de spoofing, book transparent), l'amélioration pourrait ê
 
 ---
 
-### PHASE 5 — Hyperliquid-specific alpha (moyen terme)
+### PHASE 5 — Évolutions structurelles manquantes (identifiées 2026-04-03)
+
+> Issues de la relecture des plans originaux (plan_old1/2/3.md) vs code actuel.
+
+#### 5.1. ✅ TP sortie maker (ALO limit au lieu de trigger order)
+**Impact** : round-trip fees 6 bps → 3 bps. Le breakeven WR passe de ~55% à ~40%.
+
+**Implémenté** :
+- `open_position_with_triggers()` : TP placé en `ALO limit reduce_only` (maker 1.5 bps) au lieu de trigger order (taker 4.5 bps)
+- `close_position()` retourne l'OID du TP ALO → main.rs cancel sur l'exchange à la fermeture (SL hit, max_hold, etc.)
+- Nouveau `find_coin_by_tp_oid()` pour reconnaître les fills TP ALO dans le flux `orderUpdates`
+- Sur TP ALO fill : cancel le SL trigger, close position, record P&L avec maker fee
+- SL reste un trigger order (taker) — correct car défensif et non-négociable
+
+#### 5.2. ✅ Stale quote management
+**Prévu dans plan_old3.md section 8.7.**
+
+À chaque book update, si un coin a une position avec un TP ALO resting :
+- Toxicité > `max_toxicity` → cancel TP ALO (SL reste, max_hold fermera)
+- Régime → `ActiveToxic` ou `NewslikeChaos` → cancel TP ALO
+- Le TP ne peut pas se fill dans des conditions adverses → évite les fills toxiques
+
+#### 5.3. ✅ Sortie active sur signal inverse
+**Prévu dans plan_old3.md section 8.5.**
+
+À chaque book update, pour chaque coin en position :
+- Calcul rapide du momentum `pr5s_norm` (même logique que `compute_direction_score`)
+- Si `pr5s_norm` est fortement opposé à la direction (< -0.5 pour Long, > +0.5 pour Short) → `ForceExitIoc` immédiat
+- Coupe les pertes au lieu d'attendre SL/TP/max_hold quand le momentum s'inverse
+
+#### 5.4. ⏳ Stratégies supplémentaires
+**Prévu dans plan_old1.md, une seule implémentée sur 4.**
+
+- `micro_mean_revert` — Mean reversion sur micro-price vs mid (marché ranging)
+- `imbalance_fade` — Fade l'imbalance extrême (absorption)
+- `breakout_flow` — Breakout confirmé par order flow + depth
+
+Intérêt : le MFDP momentum ne fonctionne qu'en trending. D'autres stratégies pourraient exploiter le ranging.
+
+#### 5.5. ✅ Smart max hold (sortie anticipée si perdant)
+**Actuellement** : 44-70% des trades finissent en max_hold au mid aveuglément.
+**Fix** : à 70% du `max_hold_s`, si le trade est en perte (unrealized < 0) → sortie anticipée IOC.
+Les trades profitables continuent jusqu'au TP ou max_hold.
+Effet : réduit l'exposition sur les trades perdants, libère le slot pour un meilleur trade.
+
+---
+
+### PHASE 6 — Hyperliquid-specific alpha (moyen terme)
 **Objectif : exploiter les données exclusives à Hyperliquid non disponibles sur CEX.**
 
 Ces signaux sont uniques à Hyperliquid (book on-chain transparent) et non implémentés dans aucun repo public. À développer une fois que les phases 1-3 sont stables.
@@ -219,33 +266,38 @@ Règle simple : funding > +0.08%/8h → biais short uniquement (longs surreprés
 
 ## Résultats attendus globaux
 
-### Résultats mesurés V2.0 (4.4h dry-run, 2026-04-02)
+### Résultats mesurés — progression par version
 
-| Métrique | V1 Sess.1 | V1 Sess.2 | **V2.0 mesuré** | V2.1 cible |
-|----------|-----------|-----------|----------------|------------|
-| Win Rate | 39% | 0% | **46.5%** | **55%+** |
-| P&L/trade | −$3.23 | −$3.12 | **−$0.48** | **+$0.50+** |
-| Trades/heure | 3.9 | 2.3 | **39.2** | 10-20 |
-| Concentration ETH | 57% | 77% | **18%** ✅ | <35% |
-| Pullback completion | — | 10% | **36%** ✅ | 40%+ |
-| TP hits | — | 0 | **11** | 20%+ des trades |
-| max_hold % | — | — | **70%** | <30% |
-| RangingMarket filtré | — | — | **0 (bug)** | visible |
+| Métrique | V1.0 | V1.1 | V2.0 | V2.1 | **V2.2 cible** |
+|----------|------|------|------|------|----------------|
+| Win Rate | 39% | 0% | **46.5%** | 13.4% | **45-55%** |
+| P&L/trade | −$3.23 | −$3.12 | **−$0.48** | −$3.46 | **+$0.50+** |
+| Trades/h | 3.9 | 2.3 | 39.2 | 8.2 | **2-4** |
+| PF | — | — | 0.80 | 0.10 | **>1.2** |
+| SL hit % | — | — | 24% | **51%** | <25% |
+| TP hit % | — | — | 6% | 5% | **>10%** |
+| max_hold % | — | — | 70% | 44% | <50% |
+| SL avg bps | — | — | 11.0 | 4.7 | **~8** |
+| RangingMarket | — | — | 0 (bug) | actif | actif |
+| ETH concentration | 57% | 77% | 18% ✅ | 33% | <35% |
 
-**Diagnostic V2.0** :
-- Q1 (36 premières minutes, marché trending) : 43 trades, 10 TP, WR=60%, P&L=+$75
-- Q2-Q4 (marché flat) : 129 trades, 1 TP, WR=42%, P&L=−$157
-- RangingMarket jamais déclenché (bug placement) → bot trade en flat
-- SL=12bps/TP=18bps inatteignables (mouvement moyen 4.6bps/46s) → 70% max_hold
+**Diagnostic V2.1 (10h, 82 trades, -$284)** :
+- SL=5bps dans le bruit (mouvement moyen 2.9bps) → 51% SL hit rate
+- Fees round-trip (6bps) > SL distance → BE SL coûte -$20 au lieu de protéger
+- RR=2.0 → besoin WR≥67%, réalité WR=13%
+- Biais Long 82% dans marché flat/bearish → Long WR=9%, Short WR=29%
 
-**Corrections V2.1** :
-- R1: Fix RangingMarket → élimine ~60% des trades flat
-- R2: SL=5/TP=10bps → atteignable dans l'envelope de mouvement
-- R3: Threshold 0.52→0.60 → filtre signaux tièdes
-- R4: Trailing tiers abaissés → capture gains intermédiaires
+**Leçon clé** : SL doit toujours être ≥ 2× fees round-trip (6bps). En dessous, le trade est structurellement perdant.
 
-**Objectif 10 jours** : +$500/jour (+50%) à +$1000/jour (+100%) sur $10k.
-Nécessite P&L/trade ≥ +$0.53 à ~938 trades/jour (réduit à ~300-400 avec R1+R3).
+**Corrections V2.2** :
+- SL=8bps (>2× fees, assez loin du bruit, assez proche pour protéger)
+- RR=1.5 → TP=12bps, breakeven WR=40%
+- trending_min_bps: 3→5 (edge doit > fees pour être exploitable)
+- 5 confirmations (réduction volume, meilleure qualité)
+- BE trigger à 50% (6bps = couvre les fees avant de se déclencher)
+
+**Objectif 10 jours** : +$500/jour (+50%) sur $10k.
+Avec ~50-100 trades/jour et P&L/trade ≥ +$5 → $250-500/jour.
 
 ---
 
@@ -268,8 +320,28 @@ V2.1 ✅ (2026-04-02 soir — calibration post dry-run)
 ├── ✅ [R2] SL=5bps, TP=10bps (RR=2.0), sl_vol_multiplier=3.0
 ├── ✅ [R3] direction_threshold: 0.52 → 0.60
 ├── ✅ [R4] Trailing: BE trigger 40%, tier1 50%/30%, tier2 70%/50%
-└── [TEST] ⏳ Dry-run 8h — mesurer: RangingMarket actif, max_hold <30%,
-          TP rate >15%, P&L/trade > 0, trades/h ~10-20
+└── [TEST] 10h → WR=13.4%, P&L=-$284, SL=51% — SL trop serré (5bps < fees)
+
+V2.2 ✅ (2026-04-03 matin — recalibration post V2.1 failure)
+├── ✅ SL: 5 → 8 bps (rule: SL ≥ 2× round-trip fees)
+├── ✅ RR: 2.0 → 1.5, TP ~12bps (breakeven WR=40%)
+├── ✅ trending_min_bps: 3.0 → 5.0
+├── ✅ min_direction_confirmations: 3 → 5
+├── ✅ BE trigger: 40% → 50%, trailing tiers réalignés
+└── [TEST] ⏳ Dry-run en cours
+
+V2.3 ✅ (2026-04-03 — évolutions structurelles plan_old3)
+├── ✅ [P5.1] TP ALO limit (maker 1.5bps) au lieu de trigger (taker 4.5bps)
+│         → round-trip fees: 6 → 3 bps, breakeven WR: ~55% → ~40%
+├── ✅ Cancel TP ALO quand position close (SL/max_hold/force_exit)
+├── ✅ Détection fill TP ALO dans orderUpdates + cancel SL trigger
+├── ✅ [P5.2] Stale quote: cancel TP ALO si toxicité/régime hostile
+├── ✅ [P5.3] Signal inverse: force exit si pr5s fortement opposé
+├── ✅ [P5.5] Smart max hold: sortie anticipée à 70% max_hold si perdant
+├── ✅ Diversification: +18 coins (mid-cap perps + xyz dex stocks/forex/commodities)
+├── ✅ Support xyz dex: fetch_xyz_meta(), asset_index +110000, mid from book
+└── [TEST] ⏳ Dry-run 8h+ — mesurer: signal_inverse exits, smart_exit,
+          TP maker fills, stale cancels, xyz coins active
 
 PROCHAINE ÉTAPE (~2026-04-05, quand ≥3j de données multi-level)
 ├── [P4.2] Lancer analyze_obi_levels.py sur les données L2
@@ -335,7 +407,9 @@ MOYEN TERME (≥2 semaines de dry-run stable)
 | 2026-04-02 | V1.1 | Fix WS reconnect (P0), fix DoNotTrade stuck. Session 2 : 5 trades, WR 0%, P&L −$15 |
 | 2026-04-02 | V1.2 | Recorder: ajout bid_levels/ask_levels[10] pour analyse OBI multi-level |
 | 2026-04-02 | V2.0 | Phases 1-3 + script OBI. Pivot OFI → momentum, RangingMarket, max_hold 45s, pullback timeouts, quota signal. |
-| 2026-04-02 | V2.1 | **Calibration post dry-run (172 trades, WR=46.5%, P&L=-$82)** : fix RangingMarket (placement avant tradables), SL=5/TP=10bps (RR=2.0), thresholds 0.60, trailing agressif. |
+| 2026-04-02 | V2.1 | Calibration post V2.0 dry-run : fix RangingMarket, SL=5/TP=10 (RR=2.0), thresholds 0.60. **Résultat : pire (WR=13%, SL=51%)** |
+| 2026-04-03 | V2.2 | Recalibration : SL=8/TP=12 (RR=1.5), trending=5bps, 5 confirmations. Leçon : SL ≥ 2× fees. |
+| 2026-04-03 | V2.3 | **Évolutions structurelles** : TP maker ALO (fees÷2), signal inverse exit, stale quote, smart max hold, +18 coins xyz dex. |
 
 ---
 

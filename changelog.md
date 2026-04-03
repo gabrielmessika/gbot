@@ -1,5 +1,110 @@
 # Changelog
 
+## 2026-04-03 — V2.3 : TP sortie maker (changement structurel)
+
+**Contexte** : relecture des plans originaux (plan_old1/2/3.md). Le plan prévoyait "TP passif | ALO limit" mais l'implémentation utilisait un trigger order (taker 4.5 bps). Round-trip fees = 6 bps au lieu des 3 bps prévus.
+
+### Changement : TP = ALO limit reduce_only (maker)
+- `open_position_with_triggers()` : TP placé via `rest.place_order()` avec `Tif::Alo, reduce_only: true` au lieu de `rest.place_trigger_order()`
+- `close_position()` retourne `Option<String>` (TP OID à cancel) au lieu de `()`
+- Nouveau `find_coin_by_tp_oid()` sur `PositionManager` pour matcher les fills TP ALO
+- Handling complet du fill TP ALO dans le flux `orderUpdates` : cancel SL trigger, close position, record P&L avec maker fee
+- `OpenPosition.tp_trigger_oid` renommé → `tp_order_oid`
+- SL reste un trigger order (taker) — défensif, non-négociable
+
+### Impact fees
+| Scénario | Avant (trigger) | Après (ALO) |
+|----------|----------------|-------------|
+| Entry | maker 1.5 bps | maker 1.5 bps |
+| TP exit | taker 4.5 bps | **maker 1.5 bps** |
+| SL exit | taker 4.5 bps | taker 4.5 bps |
+| Round-trip (TP) | **6.0 bps** | **3.0 bps** |
+| Breakeven WR (RR=1.5) | ~55% | **~40%** |
+
+### Fichiers
+- `src/execution/position_manager.rs` — TP ALO placement, `find_coin_by_tp_oid()`, `close_position()` return type
+- `src/main.rs` — TP ALO fill detection, cancel TP on close, cancel SL on TP fill
+
+### 5.2 Stale quote management (`src/main.rs`)
+- À chaque book update, si un coin a un TP ALO resting :
+  - `toxicity > max_toxicity` → cancel TP ALO
+  - Régime `ActiveToxic` ou `NewslikeChaos` → cancel TP ALO
+- Le SL trigger reste actif, le max_hold fermera la position
+- Évite les fills TP dans des conditions de marché adverses
+
+### 5.3 Signal inverse exit (`src/main.rs`)
+- À chaque book update, pour les coins en position :
+  - Calcul rapide `pr5s_norm = sign(pr5s) × min(|pr5s|/5, 1)`
+  - Long + `pr5s_norm < -0.5` → `ForceExitIoc` immédiat
+  - Short + `pr5s_norm > +0.5` → `ForceExitIoc` immédiat
+- Coupe les pertes quand le momentum s'inverse fortement
+- Close reason: `"signal_inverse"`
+
+### 5.5 Smart max hold (`src/main.rs`)
+- À 70% du `max_hold_s` (~31s sur 45s), si le trade est en perte → sortie anticipée
+- Les trades profitables continuent jusqu'au TP, trailing, ou max_hold normal
+- Close reason: `"smart_exit_Ns"`
+- Réduit l'exposition sur les perdants, libère le slot plus vite
+
+### Diversification coins : +18 coins dont xyz dex
+
+#### `src/exchange/rest_client.rs`
+- Ajout `fetch_xyz_meta()` — récupère les métadonnées HIP-3 (`"type": "meta", "dex": "xyz"`)
+
+#### `src/config/coins.rs`
+- `from_exchange_meta()` refactoré → `add_universe(universe, is_dex)` privé
+- `add_xyz_meta()` — ajoute les xyz avec `asset_index += 110_000`
+
+#### `src/main.rs`
+- Chargement séquentiel : standard perps puis xyz dex au startup
+
+#### `src/market_data/book_manager.rs`
+- Mid price calculé depuis le book (best_bid+best_ask/2) à chaque update
+- Nécessaire car les xyz coins ne sont pas dans le flux WS `allMids`
+
+#### `config/default.toml`
+| Ajouté | Catégorie |
+|--------|-----------|
+| WIF, PEPE, TIA, SEI, INJ, JUP, PENDLE, W, ONDO | Mid-cap perps |
+| TSLA, AAPL, NVDA, SPY, QQQ | xyz stocks |
+| EUR, GBP, JPY | xyz forex |
+| GOLD, SILVER | xyz commodities |
+
+### Évolutions restantes
+- ⏳ Stratégies supplémentaires — mean revert, imbalance fade, breakout flow (effort majeur)
+
+---
+
+## 2026-04-03 — V2.2 : Recalibration SL/TP + filtre trending renforcé
+
+**Contexte** : V2.1 a empiré les résultats (WR 46.5% → 13.4%, PF 0.80 → 0.10).
+Cause : SL=5bps dans le bruit (mouvement moyen 2.9bps), fees round-trip (6bps) > SL distance.
+
+### R1 — SL floor : 5 → 8 bps (`config/default.toml`)
+- SL=5bps = 1.7σ du bruit → 51% SL hit rate (vs 24% à 12bps en V2.0)
+- Règle : **SL ≥ 2× round-trip fees (6bps)**. SL=8bps = safe zone.
+- `sl_min_bps = 8.0`
+
+### R2 — RR ratio : 2.0 → 1.5, TP ~12bps (`config/default.toml`)
+- RR=2.0 exigeait WR ≥ 67% (irréaliste). RR=1.5 → breakeven WR=40%.
+- `target_rr = 1.5`
+
+### R3 — Filtre trending : 3.0 → 5.0 bps (`config/default.toml`)
+- V2.1 : 82 trades passaient malgré RangingMarket (seuil trop bas).
+- Avec fees=6bps, un marché qui bouge <5bps/30s n'a pas d'edge exploitable.
+- `trending_min_bps = 5.0`
+
+### R4 — Confirmations : 3 → 5 (`config/default.toml`)
+- 8.2 trades/h trop fréquent. Objectif : 2-4 trades/h de haute qualité.
+- `min_direction_confirmations = 5`
+
+### Trailing/BE réalignés avec SL=8/TP=12
+- `breakeven.trigger_pct = 50%` (50% de 12bps = 6bps = couvre les fees)
+- `trailing.tier1 = 60%/30%`, `tier2 = 80%/50%`
+- `max_mae_bps = 12.0`
+
+---
+
 ## 2026-04-02 21h — Fix fee accounting dry-run + live exit taker fee
 
 ### Dry-run : double/triple-comptage des fees (P&L faussé)

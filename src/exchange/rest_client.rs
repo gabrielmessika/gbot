@@ -93,9 +93,19 @@ impl RestClient {
     // ─── Info endpoints ───
 
     /// Fetch exchange metadata (universe of perpetuals).
+    /// Returns both standard perps and xyz dex assets (stocks, forex, commodities).
     pub async fn fetch_meta(&self) -> Result<Value> {
         self.rate_limiter.acquire_info_heavy().await?;
         let body = json!({"type": "meta"});
+        let resp = self.client.post(&self.info_url()).json(&body).send().await?;
+        let data: Value = resp.json().await?;
+        Ok(data)
+    }
+
+    /// Fetch xyz dex metadata (HIP-3 assets: stocks, forex, commodities).
+    pub async fn fetch_xyz_meta(&self) -> Result<Value> {
+        self.rate_limiter.acquire_info_heavy().await?;
+        let body = json!({"type": "meta", "dex": "xyz"});
         let resp = self.client.post(&self.info_url()).json(&body).send().await?;
         let data: Value = resp.json().await?;
         Ok(data)

@@ -42,9 +42,21 @@ impl CoinMetaStore {
         &self.coins
     }
 
-    /// Build from the Hyperliquid /info meta response.
+    /// Build from the Hyperliquid /info meta response (standard perps).
     pub fn from_exchange_meta(universe: &[serde_json::Value]) -> Self {
         let mut store = Self::new();
+        store.add_universe(universe, false);
+        store
+    }
+
+    /// Add xyz dex assets (HIP-3: stocks, forex, commodities).
+    /// xyz asset indices are offset by 110000 on Hyperliquid.
+    pub fn add_xyz_meta(&mut self, universe: &[serde_json::Value]) {
+        self.add_universe(universe, true);
+    }
+
+    fn add_universe(&mut self, universe: &[serde_json::Value], is_dex: bool) {
+        let index_offset: u32 = if is_dex { 110_000 } else { 0 };
         for (idx, item) in universe.iter().enumerate() {
             if let Some(obj) = item.as_object() {
                 let coin = obj
@@ -64,17 +76,16 @@ impl CoinMetaStore {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(10) as u32;
 
-                store.insert(CoinMeta {
+                self.insert(CoinMeta {
                     coin,
-                    asset_index: idx as u32,
+                    asset_index: index_offset + idx as u32,
                     tick_size,
-                    lot_size: tick_size, // sz_decimals applies to both
+                    lot_size: tick_size,
                     max_leverage,
-                    is_dex: false,
+                    is_dex,
                 });
             }
         }
-        store
     }
 }
 

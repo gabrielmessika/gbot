@@ -23,7 +23,8 @@ pub struct OpenPosition {
     pub opened_at: i64,
     pub break_even_applied: bool,
     pub trailing_tier: u8,
-    pub tp_trigger_oid: Option<String>,
+    /// OID of the TP limit order (ALO maker) — NOT a trigger order.
+    pub tp_order_oid: Option<String>,
     pub sl_trigger_oid: Option<String>,
     pub client_oid: String,
 }
@@ -93,25 +94,26 @@ impl PositionManager {
                 Err(e) => warn!("[POSITION] SL trigger call failed for {}: {}", position.coin, e),
             }
 
-            // TP trigger: opposite side
+            // TP as ALO limit order (maker, 1.5 bps vs 4.5 bps taker trigger)
+            // reduce_only=true ensures it closes the position, not opens a new one.
             let tp_is_buy = !sl_is_buy;
-            match rest
-                .place_trigger_order(
-                    &position.coin,
-                    tp_is_buy,
-                    position.take_profit,
-                    position.size,
-                    true, // is_tp = true
-                    asset_index,
-                )
-                .await
-            {
+            let tp_req = crate::exchange::rest_client::OrderRequest {
+                coin: position.coin.clone(),
+                asset_index,
+                is_buy: tp_is_buy,
+                price: position.take_profit,
+                size: position.size,
+                tif: crate::exchange::rest_client::Tif::Alo,
+                reduce_only: true,
+                client_oid: Some(format!("tp_{}", position.client_oid)),
+            };
+            match rest.place_order(&tp_req).await {
                 Ok(r) if r.error.is_none() => {
-                    position.tp_trigger_oid = r.oid.clone();
-                    info!("[POSITION] TP trigger placed for {}: {:?}", position.coin, r.oid);
+                    position.tp_order_oid = r.oid.clone();
+                    info!("[POSITION] TP ALO placed for {}: {:?} @ {}", position.coin, r.oid, position.take_profit);
                 }
-                Ok(r) => warn!("[POSITION] TP trigger error for {}: {:?}", position.coin, r.error),
-                Err(e) => warn!("[POSITION] TP trigger call failed for {}: {}", position.coin, e),
+                Ok(r) => warn!("[POSITION] TP ALO error for {}: {:?}", position.coin, r.error),
+                Err(e) => warn!("[POSITION] TP ALO call failed for {}: {}", position.coin, e),
             }
         }
 
@@ -170,13 +172,14 @@ impl PositionManager {
     /// Close a position and start a cooldown.
     ///
     /// `cooldown_s` is taken from `risk.cooldown_after_close_s` (not execution.breakeven).
+    /// Close a position. Returns the TP ALO order OID if one exists (caller must cancel it).
     pub fn close_position(
         &mut self,
         coin: &str,
         reason: &str,
         exit_price: Decimal,
         cooldown_s: u64,
-    ) {
+    ) -> Option<String> {
         if let Some(pos) = self.positions.remove(coin) {
             let pnl = match pos.direction {
                 Direction::Long => (exit_price - pos.entry_price) * pos.size,
@@ -188,7 +191,21 @@ impl PositionManager {
             );
             let now = chrono::Utc::now().timestamp_millis();
             self.cooldowns.insert(coin.to_string(), now + (cooldown_s as i64 * 1000));
+            // Return the TP limit order OID so the caller can cancel it on the exchange
+            pos.tp_order_oid
+        } else {
+            None
         }
+    }
+
+    /// Find which coin has a TP ALO order with this OID.
+    pub fn find_coin_by_tp_oid(&self, oid: &str) -> Option<String> {
+        for (coin, pos) in &self.positions {
+            if pos.tp_order_oid.as_deref() == Some(oid) {
+                return Some(coin.clone());
+            }
+        }
+        None
     }
 
     /// Get an open position.
@@ -389,7 +406,7 @@ impl PositionManager {
             opened_at: chrono::Utc::now().timestamp_millis(),
             break_even_applied: false,
             trailing_tier: 0,
-            tp_trigger_oid: None,
+            tp_order_oid: None,
             sl_trigger_oid: None,
             client_oid: format!("recovered-{}", ep.coin),
         };

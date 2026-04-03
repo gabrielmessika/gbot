@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
         rate_limiter.clone(),
     )?);
 
-    // ── Load coin metadata ──
+    // ── Load coin metadata (standard perps + xyz dex) ──
     let meta_store = match rest.fetch_meta().await {
         Ok(meta) => {
             let universe = meta
@@ -104,8 +104,26 @@ async fn main() -> Result<()> {
                 .and_then(|u| u.as_array())
                 .map(|arr| arr.to_vec())
                 .unwrap_or_default();
-            let store = CoinMetaStore::from_exchange_meta(&universe);
-            info!("[MAIN] Loaded metadata for {} coins", store.all().len());
+            let mut store = CoinMetaStore::from_exchange_meta(&universe);
+            info!("[MAIN] Loaded {} standard perps", store.all().len());
+
+            // Load xyz dex assets (HIP-3: stocks, forex, commodities)
+            match rest.fetch_xyz_meta().await {
+                Ok(xyz_meta) => {
+                    let xyz_universe = xyz_meta
+                        .get("universe")
+                        .and_then(|u| u.as_array())
+                        .map(|arr| arr.to_vec())
+                        .unwrap_or_default();
+                    let before = store.all().len();
+                    store.add_xyz_meta(&xyz_universe);
+                    let xyz_count = store.all().len() - before;
+                    info!("[MAIN] Loaded {} xyz dex assets (total: {})", xyz_count, store.all().len());
+                }
+                Err(e) => {
+                    warn!("[MAIN] Failed to load xyz metadata: {} — xyz coins unavailable", e);
+                }
+            }
             store
         }
         Err(e) => {
@@ -423,6 +441,116 @@ async fn main() -> Result<()> {
                                             error_count += 1;
                                             last_error = format!("Regime exit {}: {}", coin, e);
                                             last_error_ts = now_ms;
+                                        }
+                                    }
+                                }
+
+                                // ── 5.3 Signal inverse exit ──────────────────────────────────
+                                // Evaluate direction score for this coin. If it crosses the
+                                // OPPOSITE threshold, force-exit immediately instead of waiting
+                                // for SL/TP/max_hold. This cuts losses early on reversals.
+                                if !matches!(order_mgr.state(coin), gbot::execution::order_manager::TradeState::ForceExit { .. })
+                                    && features.flow.is_mature()
+                                    && features.book.spread_bps > 0.0
+                                {
+                                    if let Some(pos) = position_mgr.get(coin) {
+                                        let pr5s_norm = {
+                                            let v = features.flow.price_return_5s;
+                                            v.signum() * (v.abs() / 5.0).min(1.0)
+                                        };
+                                        // Quick directional check: is momentum strongly opposite?
+                                        let opposite = match pos.direction {
+                                            Direction::Long => pr5s_norm < -0.5,   // strong bearish momentum
+                                            Direction::Short => pr5s_norm > 0.5,   // strong bullish momentum
+                                        };
+                                        if opposite {
+                                            info!(
+                                                "[MAIN] Signal inverse for {} (pr5s={:.2}bps, pos={:?}) — force exit",
+                                                coin, features.flow.price_return_5s, pos.direction
+                                            );
+                                            let intent = Intent::ForceExitIoc {
+                                                coin: coin.clone(),
+                                                direction: pos.direction,
+                                                mid_price: Decimal::try_from(current_mid)
+                                                    .unwrap_or_default(),
+                                                size: pos.size,
+                                                reason: "signal_inverse".to_string(),
+                                            };
+                                            if let Err(e) = order_mgr
+                                                .process_intent(intent, &rest, &meta_store)
+                                                .await
+                                            {
+                                                error!("[MAIN] Signal inverse exit error for {}: {}", coin, e);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── 5.2 Stale quote: cancel TP ALO if conditions deteriorate ─
+                                // If toxicity spikes or regime becomes hostile while we have a
+                                // resting TP ALO, cancel it (position stays, SL still active).
+                                // The max_hold will eventually close the position.
+                                if let Some(pos) = position_mgr.get(coin) {
+                                    if pos.tp_order_oid.is_some() {
+                                        let should_cancel_tp =
+                                            features.flow.toxicity_proxy_instant > settings.risk.max_toxicity
+                                            || regime == regime_engine::Regime::ActiveToxic
+                                            || regime == regime_engine::Regime::NewslikeChaos;
+                                        if should_cancel_tp {
+                                            let tp_oid = pos.tp_order_oid.clone().unwrap();
+                                            let asset_idx = meta_store.get(coin).map(|m| m.asset_index).unwrap_or(0);
+                                            info!("[MAIN] Stale quote: cancelling TP ALO {} for {} (tox={:.2}, regime={:?})",
+                                                tp_oid, coin, features.flow.toxicity_proxy_instant, regime);
+                                            if let Err(e) = rest.cancel_order(coin, &tp_oid, asset_idx).await {
+                                                warn!("[MAIN] Failed to cancel stale TP ALO for {}: {}", coin, e);
+                                            }
+                                            if let Some(pos_mut) = position_mgr.get_mut(coin) {
+                                                pos_mut.tp_order_oid = None;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── 5.5 Smart max hold: early exit if losing at 70% of max_hold ─
+                                // Instead of a blind timeout, if the trade is underwater at 70%
+                                // of max_hold, exit early to limit damage. Profitable trades
+                                // continue to max_hold (or hit TP/trailing).
+                                if !matches!(order_mgr.state(coin), gbot::execution::order_manager::TradeState::ForceExit { .. }) {
+                                    if let Some(pos) = position_mgr.get(coin) {
+                                        let elapsed_s = (now_ms - pos.opened_at) / 1000;
+                                        let early_exit_threshold_s = (settings.execution.max_hold_s as f64 * 0.7) as i64;
+                                        if elapsed_s >= early_exit_threshold_s
+                                            && elapsed_s < settings.execution.max_hold_s as i64
+                                        {
+                                            let entry_f = pos.entry_price.to_string().parse::<f64>().unwrap_or(0.0);
+                                            let unrealized = match pos.direction {
+                                                Direction::Long => current_mid - entry_f,
+                                                Direction::Short => entry_f - current_mid,
+                                            };
+                                            // Exit early only if losing (unrealized < 0)
+                                            if unrealized < 0.0 {
+                                                info!(
+                                                    "[MAIN] Smart max_hold: {} losing ${:.2} at {}s/{}s — early exit",
+                                                    coin,
+                                                    unrealized * pos.size.to_string().parse::<f64>().unwrap_or(0.0),
+                                                    elapsed_s,
+                                                    settings.execution.max_hold_s
+                                                );
+                                                let intent = Intent::ForceExitIoc {
+                                                    coin: coin.clone(),
+                                                    direction: pos.direction,
+                                                    mid_price: Decimal::try_from(current_mid)
+                                                        .unwrap_or_default(),
+                                                    size: pos.size,
+                                                    reason: format!("smart_exit_{}s", elapsed_s),
+                                                };
+                                                if let Err(e) = order_mgr
+                                                    .process_intent(intent, &rest, &meta_store)
+                                                    .await
+                                                {
+                                                    error!("[MAIN] Smart exit error for {}: {}", coin, e);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -758,7 +886,7 @@ async fn main() -> Result<()> {
                                                     opened_at: now_ms,
                                                     break_even_applied: false,
                                                     trailing_tier: 0,
-                                                    tp_trigger_oid: None,
+                                                    tp_order_oid: None,
                                                     sl_trigger_oid: None,
                                                     client_oid: filled.client_oid.clone(),
                                                 };
@@ -861,13 +989,24 @@ async fn main() -> Result<()> {
                                                     None
                                                 };
 
-                                                // Close position in tracker
-                                                position_mgr.close_position(
+                                                // Close position in tracker — cancel resting TP ALO if any
+                                                let tp_oid_to_cancel = position_mgr.close_position(
                                                     &closed.coin,
                                                     &closed.reason,
                                                     closed.fill_price,
                                                     cooldown_s,
                                                 );
+                                                if let Some(tp_oid) = tp_oid_to_cancel {
+                                                    let asset_idx = meta_store
+                                                        .get(&closed.coin)
+                                                        .map(|m| m.asset_index)
+                                                        .unwrap_or(0);
+                                                    if let Err(e) = rest.cancel_order(&closed.coin, &tp_oid, asset_idx).await {
+                                                        warn!("[MAIN] Failed to cancel TP ALO {} for {}: {}", tp_oid, closed.coin, e);
+                                                    } else {
+                                                        info!("[MAIN] Cancelled TP ALO {} for {} (position closed: {})", tp_oid, closed.coin, closed.reason);
+                                                    }
+                                                }
 
                                                 // Store the closed trade
                                                 if let Some(tv) = trade_view {
@@ -895,7 +1034,80 @@ async fn main() -> Result<()> {
                                                 ));
                                             }
 
-                                            None => {} // Partial fill — state already updated
+                                            None => {
+                                                // Check if this is a TP ALO fill
+                                                let tp_coin = position_mgr.find_coin_by_tp_oid(oid);
+                                                if let Some(coin) = tp_coin {
+                                                    fills_since_summary += 1;
+                                                    let reason = "TP_HIT".to_string();
+                                                    if let Some(pos) = position_mgr.get(&coin) {
+                                                        let entry_f = pos.entry_price.to_string().parse::<f64>().unwrap_or(0.0);
+                                                        let exit_f = avg_px.to_string().parse::<f64>().unwrap_or(0.0);
+                                                        let size_f = pos.size.to_string().parse::<f64>().unwrap_or(0.0);
+                                                        let pnl_usd = match pos.direction {
+                                                            gbot::strategy::signal::Direction::Long => (exit_f - entry_f) * size_f,
+                                                            gbot::strategy::signal::Direction::Short => (entry_f - exit_f) * size_f,
+                                                        };
+                                                        let pnl_pct = if entry_f > 0.0 { pnl_usd / (entry_f * size_f) * 100.0 } else { 0.0 };
+
+                                                        journal.log_event(&JournalEvent::PositionClosed {
+                                                            ts_local: now_ms,
+                                                            coin: coin.clone(),
+                                                            direction: format!("{:?}", pos.direction),
+                                                            entry_price: pos.entry_price.to_string(),
+                                                            exit_price: avg_px.to_string(),
+                                                            pnl: format!("{:.2}", pnl_usd),
+                                                            reason: reason.clone(),
+                                                        });
+
+                                                        let trade_view = ClosedTradeView {
+                                                            coin: pos.coin.clone(),
+                                                            direction: format!("{:?}", pos.direction),
+                                                            entry_price: entry_f,
+                                                            exit_price: exit_f,
+                                                            pnl_usd,
+                                                            pnl_pct,
+                                                            close_reason: reason.clone(),
+                                                            opened_at: pos.opened_at,
+                                                            closed_at: now_ms,
+                                                            hold_s: (now_ms - pos.opened_at) / 1000,
+                                                            break_even_applied: pos.break_even_applied,
+                                                        };
+
+                                                        // TP exit = maker fee (already ALO)
+                                                        let notional = avg_px * filled_qty;
+                                                        let fee = notional * Decimal::try_from(0.00015_f64).unwrap_or_default();
+                                                        portfolio.record_fee(fee);
+                                                        portfolio.record_pnl(Decimal::try_from(pnl_usd).unwrap_or_default());
+                                                        closed_trades.push(trade_view);
+
+                                                        info!("[MAIN] TP ALO filled: {} @ {} P&L=${:.2} (maker fee)", coin, avg_px, pnl_usd);
+                                                    }
+
+                                                    // Close position — no TP to cancel (it just filled)
+                                                    // But cancel the SL trigger
+                                                    if let Some(pos) = position_mgr.get(&coin) {
+                                                        if let Some(sl_oid) = &pos.sl_trigger_oid {
+                                                            let asset_idx = meta_store.get(&coin).map(|m| m.asset_index).unwrap_or(0);
+                                                            if let Err(e) = rest.cancel_order(&coin, sl_oid, asset_idx).await {
+                                                                warn!("[MAIN] Failed to cancel SL trigger for {}: {}", coin, e);
+                                                            }
+                                                        }
+                                                    }
+                                                    // Set tp_order_oid to None before close so it doesn't try to cancel it
+                                                    if let Some(pos) = position_mgr.get_mut(&coin) {
+                                                        pos.tp_order_oid = None;
+                                                    }
+                                                    position_mgr.close_position(&coin, &reason, avg_px, cooldown_s);
+                                                    order_mgr.set_flat(&coin);
+                                                    metrics.open_positions.set(position_mgr.count() as i64);
+
+                                                    event_feed.push("fill", format!(
+                                                        "{} TP ALO filled @ {} (maker)",
+                                                        coin, avg_px
+                                                    ));
+                                                }
+                                            }
                                         }
                                     }
                                     "canceled" | "cancelled" => {
@@ -988,7 +1200,7 @@ async fn main() -> Result<()> {
                                     opened_at: now_ms,
                                     break_even_applied: false,
                                     trailing_tier: 0,
-                                    tp_trigger_oid: None,
+                                    tp_order_oid: None,
                                     sl_trigger_oid: None,
                                     client_oid: filled.client_oid.clone(),
                                 };
@@ -1120,7 +1332,8 @@ async fn main() -> Result<()> {
                             portfolio.record_fee(
                                 Decimal::try_from(exit_fee).unwrap_or_default()
                             );
-                            position_mgr.close_position(&coin, &reason, exit_price, cooldown_s);
+                            let _tp_oid = position_mgr.close_position(&coin, &reason, exit_price, cooldown_s);
+                            // In dry-run, no exchange order to cancel
                             order_mgr.set_flat(&coin);
                             closed_trades.push(trade_view);
                             metrics.open_positions.set(position_mgr.count() as i64);
