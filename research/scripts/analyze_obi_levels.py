@@ -98,6 +98,16 @@ def analyze(df: pd.DataFrame, max_levels: int = 10) -> pd.DataFrame:
         print("ERROR: bid_levels / ask_levels not in data. Ensure gbot recorder version >= multi-level.")
         sys.exit(1)
 
+    # Filter out rows without bid_levels (old recorder format)
+    has_levels = df["bid_levels"].apply(lambda x: isinstance(x, list) and len(x) > 0)
+    dropped = (~has_levels).sum()
+    if dropped > 0:
+        print(f"[INFO] Dropped {dropped} rows without bid_levels (old format)")
+        df = df[has_levels].reset_index(drop=True)
+    if len(df) == 0:
+        print("ERROR: No rows with bid_levels found.")
+        sys.exit(1)
+
     # Parse levels from JSON if stored as strings
     if isinstance(df["bid_levels"].iloc[0], str):
         df["bid_levels"] = df["bid_levels"].apply(json.loads)
