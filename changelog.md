@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-04-03 08h — Fix WS reconnect loop (31 coins → 15 coins)
+
+**Symptôme** : bot en boucle de reconnexion WS depuis le démarrage (210 erreurs "Connection reset without closing handshake", 420 reconnects en 8 min). 0 trades, tous les coins en DoNotTrade (books stale).
+
+**Cause** : 31 coins × 2 subscriptions (l2Book + trades) = 62 WS subscriptions. Hyperliquid coupe la connexion quand trop de subscriptions sont demandées sur un seul WS.
+
+**Fix** : `config/default.toml` — réduit de 31 à **15 coins** (30 WS subs).
+- Retiré : NEAR, OP (faible volume), JUP, PENDLE, W, ONDO (spread trop large)
+- Retiré : tous les xyz dex (TSLA, AAPL, NVDA, SPY, QQQ, EUR, GBP, JPY, GOLD, SILVER) — pas de liquidité suffisante pour du scalp microstructure
+- Ajouté : WIF, PEPE, TIA, SEI, INJ (mid-cap avec volume sur Hyperliquid)
+- Le support xyz reste dans le code (fetch_xyz_meta, asset_index +110000) mais désactivé en config
+
+---
+
 ## 2026-04-03 — V2.3 : TP sortie maker (changement structurel)
 
 **Contexte** : relecture des plans originaux (plan_old1/2/3.md). Le plan prévoyait "TP passif | ALO limit" mais l'implémentation utilisait un trigger order (taker 4.5 bps). Round-trip fees = 6 bps au lieu des 3 bps prévus.

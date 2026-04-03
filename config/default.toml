@@ -34,17 +34,17 @@ active = [
   # Tier 1 — très haute liquidité, spreads ultra-serrés
   "BTC", "ETH", "SOL",
   # Tier 2 — bonne liquidité, microstructure saine
-  "AVAX", "LINK", "NEAR", "ARB", "OP",
-  # Tier 3 — volume élevé, spreads parfois plus larges
+  "AVAX", "LINK", "ARB",
+  # Tier 3 — volume élevé
   "DOGE", "XRP", "SUI",
-  # Hyperliquid natif — très actif sur la plateforme
+  # Hyperliquid natif
   "HYPE",
-  # Tier 4 — mid-cap perps, diversification
-  "WIF", "PEPE", "TIA", "SEI", "INJ", "JUP", "PENDLE", "W", "ONDO",
-  # xyz dex (HIP-3) — stocks, forex, commodities (asset_index += 110000)
-  "TSLA", "AAPL", "NVDA", "SPY", "QQQ",
-  "EUR", "GBP", "JPY",
-  "GOLD", "SILVER",
+  # Tier 4 — mid-cap perps (ajout diversification)
+  "WIF", "PEPE", "TIA", "SEI", "INJ",
+  # Note: 15 coins × 2 subs = 30 WS subscriptions — safe limit.
+  # 31 coins caused reconnect loop (Connection reset).
+  # xyz dex (TSLA, AAPL, etc.) disabled until WS subscription limit is confirmed.
+  # NEAR, OP, JUP, PENDLE, W, ONDO removed (low volume / spread too wide).
 ]
 
 [features]
