@@ -124,8 +124,9 @@ sl_max_bps = 30.0         # SL cap
 target_rr = 1.5           # TP = SL × 1.5 → TP~12bps. Breakeven WR=40%
 
 # Direction confirmation — require N consecutive evaluations with score above threshold
-# V2.1: 3 confirmations → 8.2 trades/h. Raise to 5 → target 2-4 trades/h, higher quality.
-min_direction_confirmations = 5
+# V2.1: 3 → V2.2: 5 (blocked 100% of trades, 0/1010 reached 5/5) → V2.2b: back to 3.
+# Session 5 Phase A: 3 confirmations → 46 trades/7h, WR=37%, P&L≈neutral.
+min_direction_confirmations = 3
 
 # Feature maturity — minimum trades in 10s window before producing a signal
 min_trades_for_signal = 5

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-04-03 18h — min_direction_confirmations 5 → 3
+
+**Problème** : 0 trades en 6h+ de run (Session 5 Phase B). 323 signaux générés, 1010 incréments de confirmation loggés, **aucun n'atteint 5/5**. Le signal s'inverse avant que 5 confirmations consécutives ne s'accumulent.
+
+**Preuve** : Session 5 Phase A (overnight, même marché, même jour) avec `min_confirmations=3` → 46 trades en 7h, WR=37%, P&L=-$0.32/trade (quasi-neutre). Phase B avec `min_confirmations=5` → 0 trades.
+
+**Fix** : `config/default.toml` — `min_direction_confirmations` : 5 → **3**.
+
+Le filtre `trending_min_bps=5.0` reste inchangé (justifié empiriquement). Le vrai blocage était le combo confirmations=5 + pullback move timeout, pas le filtre trending.
+
+---
+
 ## 2026-04-03 08h — Fix WS reconnect loop + backoff bug
 
 **Symptôme** : bot en boucle de reconnexion WS (210 erreurs en 8 min avec 31 coins, puis 30 erreurs en 2 min avec 15 coins). 0 trades, tous les coins en DoNotTrade.

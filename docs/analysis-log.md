@@ -160,8 +160,201 @@
 - **Smart max hold** : sortie anticipée à 70% du max_hold si en perte
 - **Fee accounting corrigé** : dry-run distingue maker/taker, SL = taker fee
 
+### Résultats (après 14h de run, 02:00→16:07 UTC)
+
+#### Phase A — Overnight avec min_confirmations=3 (00:18→07:15, 7h)
+| Métrique | Valeur |
+|----------|--------|
+| Trades | 46 |
+| Win Rate | **37.0%** |
+| P&L | **-$14.93** |
+| P&L/trade | -$0.32 |
+| TP hits | 3 (7%) |
+| SL hits | 26 (57%) |
+| max_hold | 17 (37%) |
+| Long/Short | 33L / 13S |
+| Long WR | 30% |
+| Short WR | **54%** |
+
+Meilleure session jusque-là : P&L/trade quasi-neutre malgré SL=5bps/TP=10bps (pire config V2.1).
+Le biais Long persiste (72% Long, WR=30% vs Short WR=54%).
+
+#### Phase B — Journée avec min_confirmations=5 (09:45→16:07, 6h+)
+| Métrique | Valeur |
+|----------|--------|
+| Trades | **0** |
+| Signaux générés | 323 |
+| Signaux armés (pullback) | 140 setups |
+| Micro-moves confirmés | 20 (14%) |
+| Pullbacks complétés | **0** |
+| Pullback expired (move timeout) | 140 |
+| Direction confirmations 5/5 | **0** |
+
+Zéro trade en 6+ heures malgré 323 signaux valides (passent régime + direction score > 0.60).
+
+### Analyse du blocage (double filtre)
+
+**Filtre 1 : min_direction_confirmations = 5 (vs 3 overnight)**
+- 1010 incréments de confirmation loggés, 0 atteignent 5/5
+- Distribution : 1/5=186, 2/5=174, 3/5=167, 4/5=157 → les signaux s'inversent avant d'atteindre 5
+- Avec threshold=3, la session overnight a tradé 46 fois avec le même marché
+
+**Filtre 2 : Pullback completion rate effondré en journée**
+- Overnight (confirmations=3) : 93/154 micro-moves (60%), 46 trades
+- Journée (confirmations=5) : 20/140 micro-moves (14%), 0 trades
+- Le min_move de 1.5bps est atteignable en micro-structure active (nuit), mais pas en marché quiet (jour)
+
+### Analyse du marché (RangingMarket n'est pas le problème)
+
+Le régime RangingMarket a dominé **les deux phases** :
+- 07:15 (fin trading) : 10/12 coins en RangingMarket, 1 ActiveHealthy, 1 QuietTight
+- 16:07 (0 trades) : 8/10 coins en RangingMarket, 2 QuietTight
+
+Distribution de `|price_return_30s|` pour BTC aujourd'hui :
+- Mean : 0.25 bps (largement < 5.0 threshold)
+- P90 : 0.00 bps
+- **\>5 bps : 0.8% des ticks** seulement
+- \>3 bps : 1.9%, >2 bps : 3.1%
+
+Même le 02/04 (qui avait 183 trades V2.0), le profil était similaire : BTC mean=0.20bps, >5bps=1.3%.
+Les signaux qui passent le filtre trending_min_bps=5.0 existent (~1% des ticks → 323 signaux/jour) mais le **combo confirmation×5 + pullback move timeout** les bloque tous.
+
+### Est-ce que RangingMarket est trop strict ?
+
+**Non, le filtre trending en lui-même est justifié** — les sessions V2.0 Q2-Q4 et V2.1 prouvent que trader en marché flat = WR 14-42%, P&L toujours négatif. La corrélation momentum est 0 en ranging (Session 2).
+
+**Le problème est le min_direction_confirmations=5** qui, en combinaison avec le filtre trending, crée un dead zone : les rares fenêtres >5bps durent trop peu pour que 5 confirmations consécutives se cumulent avant que le marché retourne en ranging.
+
+### Recommandation
+
+1. **Revenir à min_confirmations=3** — prouvé overnight (46 trades, P&L quasi-neutre). Le passage à 5 a supprimé 100% de l'activité sans bénéfice mesurable.
+2. **Garder trending_min_bps=5.0** — empiriquement validé, le signal n'a pas d'edge <5bps.
+3. **Observer la Phase A** : avec SL=8bps (au lieu de 5bps overnight) + TP ALO maker, les résultats pourraient s'améliorer significativement. La Phase A avait SL=5bps (config V2.1 résiduelle) mais WR=37%, proche du breakeven de 40%.
+
+---
+
+## Session 6 — V2.2b (2026-04-04, 8h, 0 trades)
+
+### Config (changements vs V2.2)
+- min_direction_confirmations : 5 → **3** (fix Session 5B)
+- Reste identique : SL=8bps, RR=1.5, trending_min_bps=5.0, pullback_min_move_bps=1.5
+
+### Résultats (02:09→09:45 UTC, 8h de run)
+| Métrique | Valeur |
+|----------|--------|
+| Trades | **0** |
+| Signaux générés | 46 |
+| Confirmations 3/3 atteintes | **46** (100% — fix fonctionne) |
+| Pullback setups | 45 |
+| Micro-move confirmés | 6 (13%) |
+| Retrace timeout | 6 (100% des micro-moves) |
+| Move timeout | 38 (84%) |
+| Pullback complétés | **0** |
+
+### Analyse
+
+**Le fix confirm=3 fonctionne** — 46/46 signaux passent la confirmation (vs 0/1010 en Session 5B avec confirm=5). Le pipeline est débloqué jusqu'au pullback.
+
+**Le blocage est maintenant purement le pullback + marché ultra-flat** :
+- 84% des setups expirent en WaitingMove (prix ne bouge pas de 1.5bps en 20s)
+- Les 6 qui passent (13%) expirent en WaitingPullback (mouvement unidirectionnel, pas de retrace)
+
+**Marché du 04/04 = le plus flat depuis le lancement :**
+| Coin | |pr30s| mean | >5bps | Régime |
+|------|-------------|-------|--------|
+| BTC | 0.16 bps | 0.8% | RangingMarket |
+| ETH | 0.18 bps | 0.6% | RangingMarket |
+| SOL | 0.21 bps | 0.8% | RangingMarket |
+| HYPE | 0.47 bps | 1.8% | RangingMarket |
+
+9/10 coins en RangingMarket, 1 en ActiveToxic. Aucun coin tradable.
+
+**Biais Long confirmé dans les signaux** : 29 Long / 17 Short (63% Long), cohérent avec les sessions précédentes.
+
+**HYPE monopolise** : 26/46 signaux (57%). L'imbalance HYPE est plus volatile → le signal momentum s'y déclenche plus souvent, mais sans mouvement réel.
+
+### Lecons
+- **Le pullback est le dernier goulot d'étranglement** — une fois la confirmation débloquée, c'est le micro-move rate qui détermine si le bot trade
+- **Marché ultra-flat = pas de trades = comportement correct** — trader dans ce marché = perte garantie (ref: Session 4 WR=14%)
+- **La config V2.2b est prête** — il faut juste un marché coopératif pour valider SL=8bps + TP ALO maker + confirm=3
+
+### Données complémentaires Session 6 (04/04 09:53 UTC snapshot)
+
+**Pipeline complet confirmé sur 8h+ de données :**
+```
+Signaux générés:           46
+Confirmations 3/3:         46 (100% — fix confirm=3 fonctionne)
+Pullback setups:           45
+Micro-move confirmés:       6 (13%)
+Retrace timeout:            6 (100% des micro-moves)
+Move timeout:              38 (84% des setups)
+Pullback complétés:         0
+Trades:                     0
+```
+
+**Direction confirmations :** 48× 1/3, 47× 2/3 en plus des 46 ayant atteint 3/3. Le pipeline direction est débloqué.
+
+**Régimes au snapshot :** 9/10 RangingMarket, 1 ActiveToxic (ARB). 0 coins tradables (ni QuietTight ni ActiveHealthy).
+
+**Biais Long dans les signaux :** 29 Long / 17 Short (63/37%). HYPE monopolise 57% des signaux (26/46).
+
+**Bot status :** Equity $10,000 (simulated), 0 positions, 0 daily P&L, 10 WS reconnects, 0 kill switches, uptime 17h.
+
+---
+
+## Session intermédiaire — V1.1/V2.0 bridge (2026-04-02, 3h, 15 trades)
+
+### Contexte
+Journal `journal_2026-04-02_10-39-39.jsonl` — session intermédiaire entre V1.1 et V2.0, probablement config transitionnelle. Non documentée dans le log original.
+
 ### Résultats
-*En attente — le bot vient de se stabiliser (10 coins, WS stable, marché en RangingMarket).*
+| Métrique | Valeur |
+|----------|--------|
+| Trades | 15 |
+| Win Rate | 33.3% |
+| P&L | -$2.56 |
+| P&L/trade | -$0.17 |
+| Profit Factor | 0.92 |
+| SL hits | 8 (53%) |
+| TP hits | 4 (27%) — meilleur taux TP de toutes les sessions |
+| max_hold | 1 (7%), regime exit: 2 (13%) |
+
+### Analyse
+- **4 TP hits en 15 trades (27%)** — nettement supérieur à toutes les autres sessions (max 6% S3)
+- SL avg -$3.57, TP avg +$7.15 → RR effectif ≈ 2.0 quand le TP touche
+- ETH monopolise 60% (9/15 trades) — quota pas encore actif
+- PF 0.92 = presque breakeven malgré un WR de 33%
+
+### Lecon
+- Les 4 TP hits suggèrent un marché plus trending pendant cette session (13-16h UTC)
+- Avec un meilleur WR (via réduction SL hits), cette config aurait pu être profitable
+
+---
+
+## Session fragment — V2.2 post-Session 4 (2026-04-03, 6min, 9 trades)
+
+### Contexte
+Journal `journal_2026-04-03_05-28-03.jsonl` — 9 trades en 6 minutes juste après la fin de Session 4, bot redémarré à 07:28. Config V2.2 (SL=8bps, confirm=3).
+
+### Résultats
+| Métrique | Valeur |
+|----------|--------|
+| Trades | 9 |
+| Win Rate | 44.4% |
+| P&L | -$24.01 |
+| max_hold exits | 6 (67%), WR=67%, avg +$0.44 |
+| SL hits | 3 (33%), avg -$8.89 |
+| Directions | 100% Long |
+
+### Analyse
+- Les 3 SL hits pèsent lourd (-$8.89 chacun) vs les max_hold wins (+$0.44)
+- **Asymétrie SL/gain très défavorable** : le SL à 8bps coûte ~$9 mais les trades gagnants via max_hold font <$3
+- 100% Long — le biais Long persiste même avec confirm=3 et threshold=0.60
+- Session trop courte (6min) pour conclure, mais le pattern "gros SL, petits gains" est cohérent avec Sessions 1-4
+
+### Lecon
+- Les trades max_hold positifs restent marginaux ($0.44 avg) — confirme que le profit vient des TP, pas du hasard max_hold
+- L'asymétrie SL loss (-$9) vs max_hold gain (+$0.44) est le problème structurel : **il faut des TP hits pour compenser les SL**
 
 ---
 
@@ -192,6 +385,8 @@
 | Momentum WR=68% en trending, WR=0% en ranging | Session 2 simulation |
 | L'autocorrélation des returns tombe à 0 à 60s | Session 2 analyse |
 | Biais Long systématique en marché flat → le signal capte du bruit | Session 4 |
+| min_confirmations=5 bloque 100% des trades (0/1010 atteignent 5/5) | Session 5 |
+| min_confirmations=3 permet 46 trades/7h avec WR=37%, P&L≈neutre | Session 5 Phase A |
 
 ### SL/TP
 | Règle | Source |
@@ -219,6 +414,12 @@
 | trending_min_bps=3.0 laisse passer trop de flat | Session 4 |
 | **trending_min_bps=5.0** minimum (> fees) | Session 4 analyse |
 | En ranging, le signal momentum a WR=0% | Session 2 simulation |
+| trending_min_bps=5.0 est correct (pas trop strict) — BTC >5bps ~1% des ticks, suffisant pour 300+ signaux/jour | Session 5 |
+| Le blocage n'est PAS le trending filter mais le combo confirmations=5 + pullback move_timeout | Session 5 |
+| Avec confirm=3, le pullback micro-move devient le goulot (84% move timeout en marché flat) | Session 6 |
+| Marché ultra-flat (pr30s < 0.5bps mean) = 0 trades = comportement correct, pas un bug | Session 6 |
+| Le pullback retrace est un second filtre : 100% des micro-moves expirent en retrace timeout en marché flat | Session 6 (04/04 data) |
+| HYPE monopolise les signaux en flat (57% sur 04/04) — imbalance plus volatile mais sans edge | Session 6 |
 
 ### Infrastructure
 | Règle | Source |
@@ -237,7 +438,7 @@
 w_pr5s = 0.40
 w_pr10s = 0.20
 direction_threshold = ±0.60
-min_direction_confirmations = 5
+min_direction_confirmations = 3   # 5 bloque 100% des trades — Session 5
 trending_min_bps = 5.0
 
 # SL/TP
