@@ -114,10 +114,48 @@ pub struct RegimeSettings {
     /// Below this threshold → RangingMarket regime (no entries).
     #[serde(default = "RegimeSettings::default_trending_min_bps")]
     pub trending_min_bps: f64,
+
+    // ── Mean-reversion (EVO-1) ─────────────────────────────────────────────
+    /// Enable mean-reversion entries when regime = RangingMarket + conditions met.
+    #[serde(default = "RegimeSettings::default_mr_enabled")]
+    pub mr_enabled: bool,
+    /// Max spread (bps) to allow MR entries (tighter than directional).
+    #[serde(default = "RegimeSettings::default_mr_max_spread_bps")]
+    pub mr_max_spread_bps: f64,
+    /// Max toxicity to allow MR entries.
+    #[serde(default = "RegimeSettings::default_mr_max_toxicity")]
+    pub mr_max_toxicity: f64,
+    /// Min |micro_price_vs_mid_bps| to detect a dislocation.
+    #[serde(default = "RegimeSettings::default_mr_min_micro_dev_bps")]
+    pub mr_min_micro_dev_bps: f64,
+    /// Min |imbalance_weighted| to detect a dislocation.
+    #[serde(default = "RegimeSettings::default_mr_min_imbalance")]
+    pub mr_min_imbalance: f64,
+
+    // ── Vol spike mean-reversion (EVO-3) ───────────────────────────────────
+    /// vol_ratio threshold to detect a vol spike in flat market.
+    #[serde(default = "RegimeSettings::default_mr_vol_spike_threshold")]
+    pub mr_vol_spike_threshold: f64,
+    /// Min |price_return_5s| (bps) required alongside vol spike.
+    #[serde(default = "RegimeSettings::default_mr_vol_spike_pr5s_min_bps")]
+    pub mr_vol_spike_pr5s_min_bps: f64,
+
+    // ── Squeeze detection (EVO-2) ──────────────────────────────────────────
+    /// vol_compression above this + expanding → breakout imminent, block MR.
+    #[serde(default = "RegimeSettings::default_squeeze_vol_compression_max")]
+    pub squeeze_vol_compression_max: f64,
 }
 
 impl RegimeSettings {
     fn default_trending_min_bps() -> f64 { 3.0 }
+    fn default_mr_enabled() -> bool { true }
+    fn default_mr_max_spread_bps() -> f64 { 4.0 }
+    fn default_mr_max_toxicity() -> f64 { 0.5 }
+    fn default_mr_min_micro_dev_bps() -> f64 { 1.5 }
+    fn default_mr_min_imbalance() -> f64 { 0.4 }
+    fn default_mr_vol_spike_threshold() -> f64 { 2.0 }
+    fn default_mr_vol_spike_pr5s_min_bps() -> f64 { 2.0 }
+    fn default_squeeze_vol_compression_max() -> f64 { 1.5 }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -177,6 +215,23 @@ pub struct StrategySettings {
     // Long: ofi_10s > threshold. Short: ofi_10s < -threshold.
     #[serde(default = "StrategySettings::default_pullback_ofi_confirm")]
     pub pullback_ofi_confirm: f64,
+
+    // ── Mean-reversion SL/TP/hold (EVO-1) ─────────────────────────────────
+    /// Score threshold for MR entry (lower than directional: high WR expected).
+    #[serde(default = "StrategySettings::default_mr_threshold")]
+    pub mr_threshold: f64,
+    /// SL distance in bps for mean-reversion trades.
+    #[serde(default = "StrategySettings::default_mr_sl_bps")]
+    pub mr_sl_bps: f64,
+    /// TP distance in bps for mean-reversion trades (shorter — retour au mid).
+    #[serde(default = "StrategySettings::default_mr_tp_bps")]
+    pub mr_tp_bps: f64,
+    /// Max hold duration in seconds for MR trades.
+    #[serde(default = "StrategySettings::default_mr_max_hold_s")]
+    pub mr_max_hold_s: u64,
+    /// Cooldown in seconds between MR trades on the same coin.
+    #[serde(default = "StrategySettings::default_mr_cooldown_s")]
+    pub mr_cooldown_s: u64,
 }
 
 impl StrategySettings {
@@ -188,6 +243,11 @@ impl StrategySettings {
     fn default_min_trades_for_signal() -> usize { 5 }
     fn default_pullback_min_move_bps() -> f64 { 1.5 }
     fn default_pullback_ofi_confirm() -> f64 { 0.0 }
+    fn default_mr_threshold() -> f64 { 0.40 }
+    fn default_mr_sl_bps() -> f64 { 8.0 }
+    fn default_mr_tp_bps() -> f64 { 6.0 }
+    fn default_mr_max_hold_s() -> u64 { 30 }
+    fn default_mr_cooldown_s() -> u64 { 60 }
 }
 
 #[derive(Debug, Clone, Deserialize)]

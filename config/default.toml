@@ -87,6 +87,21 @@ max_cancel_add_ratio = 0.9
 # With 6bps round-trip fees, need |pr30s| > fees to have any directional edge.
 trending_min_bps = 5.0
 
+# ── Mean-reversion (EVO-1) ──────────────────────────────────────────────────
+# Instead of blocking all entries in flat market, exploit oscillations.
+mr_enabled = true
+mr_max_spread_bps = 4.0       # spread must be tight for 6-8 bps TP
+mr_max_toxicity = 0.5          # no toxic flow during MR
+mr_min_micro_dev_bps = 1.5     # min dislocation (micro_price vs mid)
+mr_min_imbalance = 0.4         # min book imbalance for dislocation signal
+
+# ── Vol spike MR (EVO-3) ────────────────────────────────────────────────────
+mr_vol_spike_threshold = 2.0   # vol_ratio > 2.0 = micro-event spike
+mr_vol_spike_pr5s_min_bps = 2.0 # price must have moved > 2 bps on the spike
+
+# ── Squeeze detection (EVO-2) ───────────────────────────────────────────────
+squeeze_vol_compression_max = 1.5  # vol expanding above this = breakout imminent → no MR
+
 [strategy]
 # Direction score weights — primary: price momentum (corr=+0.354 vs OFI corr=+0.058)
 w_pr5s = 0.40         # price_return_5s normalized (5bps = full signal)
@@ -130,6 +145,14 @@ min_direction_confirmations = 3
 
 # Feature maturity — minimum trades in 10s window before producing a signal
 min_trades_for_signal = 5
+
+# ── Mean-reversion SL/TP/hold (EVO-1) ──────────────────────────────────────
+# MR has lower RR (~0.75) but expects higher WR (>60%). Tighter SL/TP and shorter hold.
+mr_threshold = 0.40           # score threshold (lower than directional)
+mr_sl_bps = 8.0               # SL distance (same floor as directional)
+mr_tp_bps = 6.0               # TP distance (shorter — retour au mid, not trend capture)
+mr_max_hold_s = 30            # hold timeout (shorter — MR is fast or fails)
+mr_cooldown_s = 60            # cooldown between MR trades per coin
 
 [risk]
 max_loss_per_trade_pct = 1.5

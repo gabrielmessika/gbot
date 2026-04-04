@@ -23,6 +23,8 @@ pub enum Regime {
     LowSignal,
     /// Marché sans tendance (|price_return_30s| < trending_min_bps) — momentum nul.
     RangingMarket,
+    /// Flat market + mean-reversion conditions met → entry autorisée en sens inverse.
+    RangingMeanRevert,
     /// Kill-switch, circuit breaker, reconnect, book stale.
     DoNotTrade,
 }
@@ -30,8 +32,7 @@ pub enum Regime {
 impl Regime {
     /// Whether this regime allows new entries.
     pub fn allows_entry(&self) -> bool {
-        matches!(self, Regime::QuietTight | Regime::QuietThin | Regime::ActiveHealthy)
-        // Note: RangingMarket and LowSignal are excluded — no directional edge
+        matches!(self, Regime::QuietTight | Regime::QuietThin | Regime::ActiveHealthy | Regime::RangingMeanRevert)
     }
 
     /// Whether positions should be force-exited.
@@ -104,6 +105,23 @@ pub fn classify(
     // Empirically: directional_acc=0% in flat market (|pr30s| < trending_min_bps).
     // Bug fix: was placed after QuietTight → never triggered (QuietTight matched first).
     if features.flow.price_return_30s.abs() < settings.trending_min_bps {
+        // EVO-1 / EVO-2: Check mean-reversion conditions instead of blocking.
+        // EVO-2 squeeze guard: if vol is expanding rapidly, a breakout is imminent → no MR.
+        let vol_expanding_breakout = features.flow.vol_expanding
+            && features.flow.vol_compression > settings.squeeze_vol_compression_max;
+
+        if !vol_expanding_breakout
+            && settings.mr_enabled
+            && features.book.spread_bps < settings.mr_max_spread_bps
+            && features.flow.toxicity_proxy_instant < settings.mr_max_toxicity
+            && (features.book.micro_price_vs_mid_bps.abs() > settings.mr_min_micro_dev_bps
+                || features.book.imbalance_weighted.abs() > settings.mr_min_imbalance
+                || (features.flow.vol_ratio > settings.mr_vol_spike_threshold
+                    && features.flow.price_return_5s.abs() > settings.mr_vol_spike_pr5s_min_bps))
+        {
+            return Regime::RangingMeanRevert;
+        }
+
         return Regime::RangingMarket;
     }
 

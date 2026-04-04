@@ -1,5 +1,59 @@
 # Changelog
 
+## 2026-04-04 — EVO-1/2/3: Mean-Reversion en flat market
+
+**Objectif** : Au lieu de bloquer toutes les entrées quand `|pr30s| < 5 bps` (RangingMarket → NoTrade), exploiter les oscillations en inversant la logique directionnelle.
+
+### EVO-1 : Mode Mean-Reversion sur RangingMeanRevert
+- Nouveau régime `RangingMeanRevert` : flat market + dislocation détectée (micro_price dévié, imbalance forte, ou vol spike)
+- `mfdp.rs` : nouvelle branche `evaluate_mean_reversion()` avec `compute_mean_reversion_score()` (4 composantes : micro_dev 35%, imbalance 25%, vamp 25%, vol_spike 15%)
+- Direction inversée : si le book pousse vers le haut → short (fade), et inversement
+- SL/TP fixes (8bps / 6bps) au lieu du SL dynamique basé sur vol_30s
+- **Pas de pullback** : entrée directe en ALO (MR est transient, pas de temps à attendre)
+- **Pas de direction confirmation** : le régime confirme déjà les conditions
+- Cooldown MR dédié : 60s (vs 120s directional)
+- Max hold : 30s (vs 45s directional)
+
+### EVO-2 : Squeeze Detection (filtre anti-breakout)
+- `FlowFeatures` : ajout `vol_compression` + `vol_expanding` (ring buffer 5 ticks dans `FeatureEngine`)
+- Si vol en expansion (monotoniquement croissante sur 3+ ticks) ET `vol_compression > 1.5` → breakout imminent → bloque MR, reste en `RangingMarket`
+
+### EVO-3 : Vol Spike Mean Reversion
+- Intégré dans EVO-1 comme composante du score MR
+- Si `vol_ratio > 2.0` ET `|pr5s| > 2 bps` → signal fort de fade (poids 15% du score)
+- Condition d'entrée dans le régime : `vol_spike_threshold` + `pr5s_min_bps` dans `RegimeSettings`
+
+### Fichiers modifiés
+- `src/regime/engine.rs` — nouveau variant + classification
+- `src/strategy/mfdp.rs` — évaluation MR + score + niveaux
+- `src/features/flow_features.rs` — vol_compression, vol_expanding
+- `src/features/engine.rs` — ring buffer vol_compression par coin
+- `src/config/settings.rs` — params MR dans RegimeSettings + StrategySettings
+- `config/default.toml` — valeurs par défaut MR
+- `src/main.rs` — wiring MR direct (skip pullback + confirmation)
+
+### Config ajoutée
+```toml
+# [regime]
+mr_enabled = true
+mr_max_spread_bps = 4.0
+mr_max_toxicity = 0.5
+mr_min_micro_dev_bps = 1.5
+mr_min_imbalance = 0.4
+mr_vol_spike_threshold = 2.0
+mr_vol_spike_pr5s_min_bps = 2.0
+squeeze_vol_compression_max = 1.5
+
+# [strategy]
+mr_threshold = 0.40
+mr_sl_bps = 8.0
+mr_tp_bps = 6.0
+mr_max_hold_s = 30
+mr_cooldown_s = 60
+```
+
+---
+
 ## 2026-04-03 18h — min_direction_confirmations 5 → 3
 
 **Problème** : 0 trades en 6h+ de run (Session 5 Phase B). 323 signaux générés, 1010 incréments de confirmation loggés, **aucun n'atteint 5/5**. Le signal s'inverse avant que 5 confirmations consécutives ne s'accumulent.

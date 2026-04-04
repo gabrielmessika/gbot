@@ -40,6 +40,10 @@ impl MfdpStrategy {
             | Regime::WideSpread
             | Regime::LowSignal
             | Regime::RangingMarket => return (Intent::NoTrade, 0.0, 0.0),
+            // EVO-1: Mean-reversion path for flat markets
+            Regime::RangingMeanRevert => {
+                return self.evaluate_mean_reversion(coin, features, book);
+            }
             _ => {}
         }
 
@@ -245,6 +249,152 @@ impl MfdpStrategy {
             tp_pct * 100.0,
             sl_min_pct * 100.0,
             sl_max_pct * 100.0,
+        );
+
+        Some((entry, sl, tp))
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // EVO-1 / EVO-3: Mean-reversion in flat (RangingMeanRevert) regime
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// Evaluate mean-reversion opportunity in a flat market.
+    /// Inverts book microstructure signals: if the book pushes price up → short (fade).
+    /// Returns (Intent, mr_score, queue_score).
+    fn evaluate_mean_reversion(
+        &self,
+        coin: &str,
+        features: &CoinFeatures,
+        book: &OrderBook,
+    ) -> (Intent, f64, f64) {
+        // Feature maturity gate
+        if !features.flow.is_mature() {
+            return (Intent::NoTrade, 0.0, 0.0);
+        }
+        if features.book.spread_bps <= 0.0 {
+            return (Intent::NoTrade, 0.0, 0.0);
+        }
+
+        // Queue score: reuse existing queue desirability
+        let queue_score = self.compute_queue_score(features);
+        if queue_score < self.settings.queue_score_threshold {
+            return (Intent::NoTrade, 0.0, queue_score);
+        }
+
+        // Mean-reversion score (signed: + = fade short, - = fade long)
+        let mr_score = self.compute_mean_reversion_score(features);
+
+        if mr_score.abs() < self.settings.mr_threshold {
+            return (Intent::NoTrade, mr_score, queue_score);
+        }
+
+        // Direction: INVERSE of the dislocation
+        // Positive mr_score = book/price pushed UP → short (expect return down)
+        // Negative mr_score = book/price pushed DOWN → long (expect return up)
+        let direction = if mr_score > 0.0 {
+            Direction::Short
+        } else {
+            Direction::Long
+        };
+
+        // Compute entry/SL/TP with fixed MR distances
+        let (entry_price, stop_loss, take_profit) =
+            match self.compute_mr_levels(direction, book) {
+                Some(levels) => levels,
+                None => return (Intent::NoTrade, mr_score, queue_score),
+            };
+
+        info!(
+            "[MR] Signal: {} {} | mr_score={:.3} | queue={:.3} | entry={} | sl={} | tp={} | micro={:.2} imb={:.2} vol_r={:.2}",
+            coin,
+            match direction { Direction::Long => "LONG", Direction::Short => "SHORT" },
+            mr_score, queue_score, entry_price, stop_loss, take_profit,
+            features.book.micro_price_vs_mid_bps,
+            features.book.imbalance_weighted,
+            features.flow.vol_ratio,
+        );
+
+        // size = ZERO; computed by main.rs via risk_mgr
+        // max_wait_s = mr_max_hold_s (no pullback for MR: direct entry)
+        (Intent::PlacePassiveEntry {
+            coin: coin.to_string(),
+            direction,
+            price: entry_price,
+            stop_loss,
+            take_profit,
+            size: Decimal::ZERO,
+            max_wait_s: self.settings.mr_max_hold_s,
+        }, mr_score, queue_score)
+    }
+
+    /// Compute the mean-reversion score from microstructure features.
+    ///
+    /// Returns a SIGNED score: positive = price pushed UP (short to fade),
+    ///                          negative = price pushed DOWN (long to fade).
+    ///
+    /// Components (EVO-1 + EVO-3):
+    ///   - micro_price_vs_mid_bps: primary dislocation signal
+    ///   - imbalance_weighted: book pressure that should revert
+    ///   - vamp_signal_bps: deeper book dislocation
+    ///   - vol_spike fade (EVO-3): if vol_ratio > 2.0, fade the price_return_5s direction
+    fn compute_mean_reversion_score(&self, features: &CoinFeatures) -> f64 {
+        // Normalize each component to roughly [-1, +1]
+        let micro_dev = (features.book.micro_price_vs_mid_bps / 3.0).clamp(-1.0, 1.0);
+        let imb = features.book.imbalance_weighted.clamp(-1.0, 1.0);
+        let vamp_dev = (features.book.vamp_signal_bps / 3.0).clamp(-1.0, 1.0);
+
+        // EVO-3: Vol spike fade — if vol spiked and price moved, fade the move
+        let vol_spike_signal = if features.flow.vol_ratio > 2.0
+            && features.flow.price_return_5s.abs() > 2.0
+        {
+            // Strong signal: price moved on a spike → fade it
+            let pr5s_norm = (features.flow.price_return_5s / 5.0).clamp(-1.0, 1.0);
+            pr5s_norm  // positive pr5s → positive signal → will become short (fade)
+        } else {
+            // Mild vol contribution: higher vol in flat = more reversion opportunity
+            let vol_excess = (features.flow.vol_ratio - 1.0).max(0.0) / 2.0;
+            vol_excess * micro_dev.signum() // align with primary dislocation
+        };
+
+        // Weighted sum — all point in the "dislocation direction"
+        // The caller will INVERT the direction (positive → short, negative → long)
+        0.35 * micro_dev + 0.25 * imb + 0.25 * vamp_dev + 0.15 * vol_spike_signal
+    }
+
+    /// Compute entry, SL and TP for a mean-reversion trade.
+    /// Uses fixed bps distances from config (not vol-based like directional trades).
+    fn compute_mr_levels(
+        &self,
+        direction: Direction,
+        book: &OrderBook,
+    ) -> Option<(Decimal, Decimal, Decimal)> {
+        let best_bid = Decimal::try_from(book.best_bid()?).ok()?;
+        let best_ask = Decimal::try_from(book.best_ask()?).ok()?;
+
+        let sl_pct = self.settings.mr_sl_bps / 10_000.0;
+        let tp_pct = self.settings.mr_tp_bps / 10_000.0;
+
+        let sl_mult = Decimal::try_from(sl_pct).unwrap_or(Decimal::new(8, 4));
+        let tp_mult = Decimal::try_from(tp_pct).unwrap_or(Decimal::new(6, 4));
+
+        let (entry, sl, tp) = match direction {
+            Direction::Long => {
+                let entry = best_bid;
+                let sl = entry - entry * sl_mult;
+                let tp = entry + entry * tp_mult;
+                (entry, sl, tp)
+            }
+            Direction::Short => {
+                let entry = best_ask;
+                let sl = entry + entry * sl_mult;
+                let tp = entry - entry * tp_mult;
+                (entry, sl, tp)
+            }
+        };
+
+        debug!(
+            "[MR] Levels: sl={:.4}bps tp={:.4}bps entry={} sl={} tp={}",
+            self.settings.mr_sl_bps, self.settings.mr_tp_bps, entry, sl, tp
         );
 
         Some((entry, sl, tp))
