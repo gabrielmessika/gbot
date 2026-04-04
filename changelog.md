@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-04-04 — EVO-4 : False Breakout Fade — ABANDONNÉ, code supprimé
+
+Implémentation complète du faux breakout fade pour marchés flat (RangingMarket).
+
+**Mécanisme** : FSM dans `FeatureEngine` traquait les breakouts au-delà du range 60s. Quand le prix réintégrait le range avec faible volume → signal de fade en direction opposée.
+
+**Backtest résultat** : 248 trades, WR 3%, P&L **-$582** sur 4 jours / 13 coins. Même problème que MR — TP (~1.5bps) < fees (3bps round-trip).
+
+**Bug fix pendant l'implémentation** : le range 60s incluait le prix courant → breakouts jamais détectés. Fix : fenêtre [60s…2s] excluant les 2 dernières secondes.
+
+**Code entièrement supprimé** : BreakoutState/BreakoutTracker (engine.rs), price range fields (flow_features.rs), FalseBreakoutSettings (settings.rs), evaluate_false_breakout (mfdp.rs), FB wiring (main.rs + runner.rs), [false_breakout] config (default.toml).
+
+---
+
 ## 2026-04-04 — EVO-1/2/3 abandonné (Mean-Reversion en flat market)
 
 **Résultat backtest 4 jours (01-04 avril, 13 coins)** : 6491 trades, WR 10.5%, P&L **-$6785**, Max DD 67.9%, fee drag 242%. Tous les coins négatifs. Abandonné — le flat market n'a pas assez d'amplitude pour couvrir les fees (TP=6bps vs fees=3bps round-trip, avg MFE=1.46bps).

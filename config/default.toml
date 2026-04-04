@@ -150,8 +150,15 @@ max_toxicity = 0.7
 max_vol_ratio = 3.0
 equity_spike_guard_pct = 5.0
 # Per-coin signal quota: max signals per coin in any rolling 10-minute window.
-# Prevents ETH/BTC monopoly due to higher BookUpdate event rate.
-max_signals_per_coin_10min = 6
+# V2.3: 6 → 2. Apr 4 showed 37 consecutive ETH Short trades (WR=0%, -$286).
+# With quota=6 + cooldown=120s, one coin monopolized 100% of activity.
+# Quota=2 forces diversification across coins.
+max_signals_per_coin_10min = 2
+
+# Streak breaker: after N consecutive SL_HIT on a coin, block it for block_s seconds.
+# Apr 4: 34 consecutive ETH SL_HIT. With streak_max=3, would have stopped after 3 (-$25 vs -$286).
+sl_streak_max = 3
+sl_streak_block_s = 1800   # 30 minutes
 
 [risk.leverage]
 min_leverage = 1

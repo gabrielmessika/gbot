@@ -80,6 +80,27 @@ impl MfdpStrategy {
             None => return (Intent::NoTrade, direction_score, queue_score),
         };
 
+        // Momentum concordance filter: pr5s and pr10s must agree on direction.
+        // Apr 2-3 data: winners and losers had identical dir_score (0.674 vs 0.672).
+        // Contradictory momentum (pr5s up + pr10s down) produces scores that pass
+        // the threshold but have zero predictive power. Require alignment.
+        let pr5s = features.flow.price_return_5s;
+        let pr10s = features.flow.price_return_10s;
+        if pr5s.abs() > 0.5 && pr10s.abs() > 0.5 {
+            // Both have meaningful magnitude — check they agree with trade direction
+            let momentum_agrees = match direction {
+                Direction::Long => pr5s > 0.0 && pr10s > 0.0,
+                Direction::Short => pr5s < 0.0 && pr10s < 0.0,
+            };
+            if !momentum_agrees {
+                debug!(
+                    "[MFDP] {} momentum discord: pr5s={:.2} pr10s={:.2} vs {:?} — skip",
+                    coin, pr5s, pr10s, direction
+                );
+                return (Intent::NoTrade, direction_score, queue_score);
+            }
+        }
+
         // Determine entry / SL / TP price levels (dynamic based on volatility)
         let (entry_price, stop_loss, take_profit) =
             match self.compute_levels(direction, book, features.flow.realized_vol_30s) {

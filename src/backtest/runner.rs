@@ -314,13 +314,15 @@ impl BacktestRunner {
                     }
                 }
 
+                let hold_limit_s = settings.execution.max_hold_s as i64;
+
                 let exit = match trade.direction {
                     Direction::Long => {
                         if mid <= trade.stop_loss {
                             Some(("SL_HIT", trade.stop_loss))
                         } else if mid >= trade.take_profit {
                             Some(("TP_HIT", trade.take_profit))
-                        } else if (now_ms - trade.entry_ts) / 1000 > settings.execution.max_hold_s as i64 {
+                        } else if (now_ms - trade.entry_ts) / 1000 > hold_limit_s {
                             Some(("TIMEOUT", mid))
                         } else {
                             None
@@ -331,7 +333,7 @@ impl BacktestRunner {
                             Some(("SL_HIT", trade.stop_loss))
                         } else if mid <= trade.take_profit {
                             Some(("TP_HIT", trade.take_profit))
-                        } else if (now_ms - trade.entry_ts) / 1000 > settings.execution.max_hold_s as i64 {
+                        } else if (now_ms - trade.entry_ts) / 1000 > hold_limit_s {
                             Some(("TIMEOUT", mid))
                         } else {
                             None
@@ -386,9 +388,12 @@ impl BacktestRunner {
             if active.is_none() && book.snapshot_loaded && tape.len() >= 10 {
                 let book_feats = book_features::compute_book_features(&book, &mut spread_avg);
                 let flow_feats = flow_features::compute_flow_features(&tape, now_ms, 0.0);
+
                 let features = CoinFeatures { book: book_feats, flow: flow_feats, timestamp: now_ms };
 
                 let regime = regime_engine::classify(&features, false, false, &settings.regime, None);
+
+                // ── Directional MFDP path ─────────────────────
                 let (intent, _dir_score, _queue_score) = self.strategy.evaluate(coin, &features, regime, &book);
 
                 if let Intent::PlacePassiveEntry {
@@ -481,8 +486,8 @@ struct ActiveTrade {
     entry_price: f64,
     stop_loss: f64,
     take_profit: f64,
-    size: f64,       // coins
-    size_usd: f64,   // notional at entry
+    size: f64,
+    size_usd: f64,
     leverage: u32,
     entry_ts: i64,
     mae_bps: f64,

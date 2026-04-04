@@ -52,7 +52,7 @@ impl FeatureEngine {
 
         // Flow features — pass cancel_add_ratio from BookManager delta stats
         let cancel_add_ratio = book_mgr.get_cancel_add_ratio(coin);
-        let mut flow_feats = if let Some(tape) = book_mgr.tapes.get(coin) {
+        let flow_feats = if let Some(tape) = book_mgr.tapes.get(coin) {
             flow_features::compute_flow_features(&tape, now_ms, cancel_add_ratio)
         } else {
             FlowFeatures::default()

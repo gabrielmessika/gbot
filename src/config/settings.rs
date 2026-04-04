@@ -252,10 +252,19 @@ pub struct RiskSettings {
     /// Prevents ETH/BTC monopoly due to higher BookUpdate rate.
     #[serde(default = "RiskSettings::default_max_signals_per_coin_10min")]
     pub max_signals_per_coin_10min: u32,
+
+    /// Streak breaker: block coin after N consecutive SL hits.
+    #[serde(default = "RiskSettings::default_sl_streak_max")]
+    pub sl_streak_max: u32,
+    /// How long to block the coin after streak is hit (seconds).
+    #[serde(default = "RiskSettings::default_sl_streak_block_s")]
+    pub sl_streak_block_s: u64,
 }
 
 impl RiskSettings {
     fn default_max_signals_per_coin_10min() -> u32 { 6 }
+    fn default_sl_streak_max() -> u32 { 3 }
+    fn default_sl_streak_block_s() -> u64 { 1800 }
 }
 
 #[derive(Debug, Clone, Deserialize)]

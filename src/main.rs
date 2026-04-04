@@ -249,6 +249,14 @@ async fn main() -> Result<()> {
     let max_signals_per_coin_10min = settings.risk.max_signals_per_coin_10min;
     let signal_quota_window_ms: i64 = 600_000; // 10 minutes
 
+    // ── Streak breaker: block coin after N consecutive SL hits ───────────────
+    // Tracks (consecutive_sl_count, blocked_until_ms) per coin.
+    // After 3 consecutive SL_HIT on a coin, block it for 30 minutes.
+    // Apr 4: 37 consecutive ETH Short SL_HIT (-$286) — this prevents that.
+    let mut coin_sl_streak: HashMap<String, (u32, i64)> = HashMap::new();
+    let sl_streak_max: u32 = settings.risk.sl_streak_max;
+    let sl_streak_block_ms: i64 = settings.risk.sl_streak_block_s as i64 * 1000;
+
     // ── Phase 7.5: Pullback tracker ──────────────────────────────────────────
     // After direction confirmation, instead of placing the order immediately,
     // we arm the pullback tracker. It waits for a micro-move then a retrace,
@@ -738,6 +746,18 @@ async fn main() -> Result<()> {
                                         // Reset counter after direction confirmed
                                         *count = 0;
 
+                                        // ── Streak breaker check ──────────────────────────────
+                                        // Block coin if it has hit N consecutive SL_HITs recently.
+                                        if let Some(&(streak, blocked_until)) = coin_sl_streak.get(coin) {
+                                            if streak >= sl_streak_max && now_ms < blocked_until {
+                                                debug!(
+                                                    "[MAIN] {} blocked by streak breaker ({} consecutive SL, {}s remaining)",
+                                                    coin, streak, (blocked_until - now_ms) / 1000
+                                                );
+                                                continue;
+                                            }
+                                        }
+
                                         // ── Per-coin signal quota check ───────────────────────
                                         // Prune timestamps older than 10min, then check quota.
                                         let ts_queue = coin_signal_timestamps
@@ -1029,6 +1049,23 @@ async fn main() -> Result<()> {
                                                 portfolio.record_fee(fee);
                                                 metrics.open_positions.set(position_mgr.count() as i64);
 
+                                                // ── Streak breaker update ────────────────────────
+                                                {
+                                                    let entry = coin_sl_streak.entry(closed.coin.clone()).or_insert((0, 0));
+                                                    if closed.reason.contains("SL") {
+                                                        entry.0 += 1;
+                                                        if entry.0 >= sl_streak_max {
+                                                            entry.1 = now_ms + sl_streak_block_ms;
+                                                            info!(
+                                                                "[RISK] {} streak breaker: {} consecutive SL — blocked for {}s",
+                                                                closed.coin, entry.0, sl_streak_block_ms / 1000
+                                                            );
+                                                        }
+                                                    } else {
+                                                        entry.0 = 0; // reset on non-SL close
+                                                    }
+                                                }
+
                                                 event_feed.push("fill", format!(
                                                     "{} closed @ {} — {}",
                                                     closed.coin, closed.fill_price, closed.reason
@@ -1102,6 +1139,9 @@ async fn main() -> Result<()> {
                                                     position_mgr.close_position(&coin, &reason, avg_px, cooldown_s);
                                                     order_mgr.set_flat(&coin);
                                                     metrics.open_positions.set(position_mgr.count() as i64);
+
+                                                    // Streak breaker: TP hit resets the SL streak
+                                                    coin_sl_streak.entry(coin.clone()).or_insert((0, 0)).0 = 0;
 
                                                     event_feed.push("fill", format!(
                                                         "{} TP ALO filled @ {} (maker)",
@@ -1338,6 +1378,23 @@ async fn main() -> Result<()> {
                             order_mgr.set_flat(&coin);
                             closed_trades.push(trade_view);
                             metrics.open_positions.set(position_mgr.count() as i64);
+
+                            // ── Streak breaker update (dry-run) ──────────────
+                            {
+                                let entry = coin_sl_streak.entry(coin.clone()).or_insert((0, 0));
+                                if reason.contains("SL") {
+                                    entry.0 += 1;
+                                    if entry.0 >= sl_streak_max {
+                                        entry.1 = now_ms + sl_streak_block_ms;
+                                        info!(
+                                            "[RISK] {} streak breaker: {} consecutive SL — blocked for {}s",
+                                            coin, entry.0, sl_streak_block_ms / 1000
+                                        );
+                                    }
+                                } else {
+                                    entry.0 = 0;
+                                }
+                            }
 
                             // Update simulated equity with net P&L (gross - all fees)
                             current_equity += Decimal::try_from(net_pnl).unwrap_or_default();
