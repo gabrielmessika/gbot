@@ -40,12 +40,6 @@ pub struct FlowFeatures {
     // Cancel/add ratio (spoofing proxy)
     pub cancel_add_ratio: f64,
 
-    // EVO-2: Volatility compression (squeeze detection)
-    /// realized_vol_3s / realized_vol_30s — same as vol_ratio, aliased for clarity.
-    pub vol_compression: f64,
-    /// True if vol_compression has been increasing over the last N ticks (breakout signal).
-    pub vol_expanding: bool,
-
     // Maturity indicators
     pub trade_count_10s: usize,
 }
@@ -142,11 +136,6 @@ pub fn compute_flow_features(tape: &VecDeque<TapeEntry>, now_ms: i64, cancel_add
 
     // ── Cancel/add ratio (spoofing proxy) — supplied from BookManager delta stats ──
     features.cancel_add_ratio = cancel_add_ratio;
-
-    // ── Vol compression (EVO-2) — same as vol_ratio, set here for clarity ──
-    // vol_expanding is stateful and must be computed in FeatureEngine.
-    features.vol_compression = features.vol_ratio;
-    features.vol_expanding = false; // default; overridden by FeatureEngine
 
     // ── Refill speed — requires per-level order tracking, not yet available ──
     // features.refill_speed = ...; // TODO: implement with L2 order-level tracking

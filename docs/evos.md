@@ -32,6 +32,11 @@
 
 ## P0 — Quick wins (jours, pas de refactoring)
 
+> **RÉSULTAT : ABANDONNÉ** — EVO-1/2/3 implémentés et testés en backtest sur 4 jours (01-04 avril 2026, 13 coins).
+> Résultat : 6491 trades, WR 10.5%, P&L **-$6785**, Max DD 67.9%, fee drag 242%.
+> Tous les coins négatifs. Le flat market n'a pas assez d'amplitude pour couvrir les fees
+> (TP=6bps vs fees=3bps round-trip, avg MFE=1.46bps). Code entièrement reverté.
+
 ### EVO-1 : Mode Mean-Reversion sur RangingMarket
 
 **Objectif** : Au lieu de bloquer toutes les entrées quand `|pr30s| < 5 bps`, exploiter les oscillations autour de la moyenne en inversant la logique directionnelle.
@@ -112,6 +117,12 @@
 - [ ] **Win rate simulé** : Sur les données historiques, quand `|micro_price_vs_mid_bps| > 1.5` en RangingMarket, est-ce que le prix revient effectivement vers le mid dans les 30s suivantes ?
 - [ ] **Impact des fees** : Avec TP=6 bps et fees=3 bps (maker/maker), le profit net est 3 bps/trade. Le WR breakeven est ~57% (fees incluses). Est-ce atteignable ?
 
+**Résultat (2026-04-04)** : ❌ ABANDONNÉ
+- Backtest 4 jours (01-04/04), 13 coins : 6491 trades, WR=10.5%, P&L=-$6785, DD=67.9%
+- Fee drag 242% — les fees mangent 2.4× le profit brut
+- Avg MFE=1.46bps vs TP=6bps — le prix ne bouge jamais assez pour atteindre le TP
+- Breakeven WR nécessaire ~57%, obtenu ~10% — non viable
+
 ---
 
 ### EVO-2 : Squeeze Detection (filtre de régime amélioré)
@@ -161,6 +172,8 @@
 - [ ] **Réduction des faux signaux MR** : Combien de trades MR auraient été évités par le filtre squeeze, et parmi ceux-ci combien auraient touché le SL ?
 - [ ] **Corrélation vol_compression / SL rate** : Comparer le SL rate des trades MR avec et sans filtre squeeze
 
+**Résultat (2026-04-04)** : ❌ ABANDONNÉ avec EVO-1. Le filtre squeeze était fonctionnel mais inutile car la stratégie MR sous-jacente est non viable.
+
 ---
 
 ### EVO-3 : Vol Spike Mean Reversion
@@ -203,6 +216,8 @@
 - [ ] **Taux de retour post-spike** : Quand pr5s spike > 2 bps en flat, est-ce que le prix revient dans les 30s ? Mesurer % de retour et half-life
 - [ ] **Distinction spike vs breakout** : Un vol_spike en flat qui NE revient PAS = début de breakout. Mesurer le ratio (retour / continuation) pour calibrer le SL
 - [ ] **P&L simulé** : Backtester sur sessions flat (Session 4, 6) avec la logique vol-spike fade
+
+**Résultat (2026-04-04)** : ❌ ABANDONNÉ avec EVO-1. Le vol-spike fade (composante du MR score avec poids adaptatif 85%) était le principal driver de signaux, mais le MFE post-spike est insuffisant pour couvrir les fees.
 
 ---
 

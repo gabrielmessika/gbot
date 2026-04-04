@@ -215,23 +215,6 @@ pub struct StrategySettings {
     // Long: ofi_10s > threshold. Short: ofi_10s < -threshold.
     #[serde(default = "StrategySettings::default_pullback_ofi_confirm")]
     pub pullback_ofi_confirm: f64,
-
-    // ── Mean-reversion SL/TP/hold (EVO-1) ─────────────────────────────────
-    /// Score threshold for MR entry (lower than directional: high WR expected).
-    #[serde(default = "StrategySettings::default_mr_threshold")]
-    pub mr_threshold: f64,
-    /// SL distance in bps for mean-reversion trades.
-    #[serde(default = "StrategySettings::default_mr_sl_bps")]
-    pub mr_sl_bps: f64,
-    /// TP distance in bps for mean-reversion trades (shorter — retour au mid).
-    #[serde(default = "StrategySettings::default_mr_tp_bps")]
-    pub mr_tp_bps: f64,
-    /// Max hold duration in seconds for MR trades.
-    #[serde(default = "StrategySettings::default_mr_max_hold_s")]
-    pub mr_max_hold_s: u64,
-    /// Cooldown in seconds between MR trades on the same coin.
-    #[serde(default = "StrategySettings::default_mr_cooldown_s")]
-    pub mr_cooldown_s: u64,
 }
 
 impl StrategySettings {
@@ -243,11 +226,6 @@ impl StrategySettings {
     fn default_min_trades_for_signal() -> usize { 5 }
     fn default_pullback_min_move_bps() -> f64 { 1.5 }
     fn default_pullback_ofi_confirm() -> f64 { 0.0 }
-    fn default_mr_threshold() -> f64 { 0.40 }
-    fn default_mr_sl_bps() -> f64 { 8.0 }
-    fn default_mr_tp_bps() -> f64 { 6.0 }
-    fn default_mr_max_hold_s() -> u64 { 30 }
-    fn default_mr_cooldown_s() -> u64 { 60 }
 }
 
 #[derive(Debug, Clone, Deserialize)]

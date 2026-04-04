@@ -254,11 +254,26 @@ impl BacktestRunner {
                 let rec = &book_records[book_idx];
                 book_idx += 1;
                 if rec.best_bid > 0.0 && rec.best_ask > 0.0 {
-                    book.apply_snapshot(
-                        &[BookLevel { price: rec.best_bid, size: 1.0 }],
-                        &[BookLevel { price: rec.best_ask, size: 1.0 }],
-                        rec.timestamp,
-                    );
+                    // Prefer multi-level book when available (recorded since bid_levels/ask_levels addition).
+                    if !rec.bid_levels.is_empty() && !rec.ask_levels.is_empty() {
+                        let bids: Vec<BookLevel> = rec.bid_levels.iter()
+                            .map(|l| BookLevel { price: l[0], size: l[1] })
+                            .collect();
+                        let asks: Vec<BookLevel> = rec.ask_levels.iter()
+                            .map(|l| BookLevel { price: l[0], size: l[1] })
+                            .collect();
+                        book.apply_snapshot(&bids, &asks, rec.timestamp);
+                    } else {
+                        // Fallback: single-level from depth fields (older recordings).
+                        let mid = (rec.best_bid + rec.best_ask) / 2.0;
+                        let bid_size = if mid > 0.0 { rec.bid_depth_10bps / mid } else { 1.0 };
+                        let ask_size = if mid > 0.0 { rec.ask_depth_10bps / mid } else { 1.0 };
+                        book.apply_snapshot(
+                            &[BookLevel { price: rec.best_bid, size: bid_size.max(0.001) }],
+                            &[BookLevel { price: rec.best_ask, size: ask_size.max(0.001) }],
+                            rec.timestamp,
+                        );
+                    }
                 }
                 rec.timestamp
             } else {

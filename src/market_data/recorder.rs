@@ -23,8 +23,10 @@ pub struct BookRecord {
     pub spread_bps: f64,
     pub mid: f64,
     /// Top 10 bid levels [price, size] for multi-level OBI analysis.
+    #[serde(default)]
     pub bid_levels: Vec<[f64; 2]>,
     /// Top 10 ask levels [price, size] for multi-level OBI analysis.
+    #[serde(default)]
     pub ask_levels: Vec<[f64; 2]>,
 }
 
